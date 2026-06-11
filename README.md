@@ -29,6 +29,8 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
+After pulling changes, rebuild the existing build tree or delete it and configure again. The app logs `UsbCastReceiver build git='...'` at startup; use that line to confirm the running executable contains the expected commit.
+
 ## Run
 
 Run with default device selection:

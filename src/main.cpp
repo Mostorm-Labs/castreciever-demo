@@ -9,6 +9,14 @@
 
 namespace {
 
+#ifndef USB_CAST_RECEIVER_GIT_SHA
+#define USB_CAST_RECEIVER_GIT_SHA L"unknown"
+#endif
+
+#ifndef USB_CAST_RECEIVER_BUILD_TIME_UTC
+#define USB_CAST_RECEIVER_BUILD_TIME_UTC L"unknown"
+#endif
+
 AppOptions ParseCommandLine()
 {
     AppOptions options;
@@ -84,6 +92,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     }
 
     const AppOptions options = ParseCommandLine();
+    Log::Write(L"UsbCastReceiver build git='%s' built='%s'", USB_CAST_RECEIVER_GIT_SHA, USB_CAST_RECEIVER_BUILD_TIME_UTC);
+
     const wchar_t* backendName = L"capture";
     if (options.videoBackend == VideoBackend::SourceReader) {
         backendName = L"source-reader";

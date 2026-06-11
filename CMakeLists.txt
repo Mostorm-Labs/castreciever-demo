@@ -6,6 +6,20 @@ if(NOT WIN32)
     message(FATAL_ERROR "UsbCastReceiver is a Windows-only PoC. Configure it on Windows 10/11 with Visual Studio 2022.")
 endif()
 
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE USB_CAST_RECEIVER_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+if(NOT USB_CAST_RECEIVER_GIT_SHA)
+    set(USB_CAST_RECEIVER_GIT_SHA "unknown")
+endif()
+
+string(TIMESTAMP USB_CAST_RECEIVER_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+
 add_executable(UsbCastReceiver WIN32
     src/main.cpp
     src/App.cpp
@@ -26,6 +40,8 @@ target_compile_definitions(UsbCastReceiver PRIVATE
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
+    USB_CAST_RECEIVER_GIT_SHA=L"${USB_CAST_RECEIVER_GIT_SHA}"
+    USB_CAST_RECEIVER_BUILD_TIME_UTC=L"${USB_CAST_RECEIVER_BUILD_TIME_UTC}"
 )
 
 target_include_directories(UsbCastReceiver PRIVATE
