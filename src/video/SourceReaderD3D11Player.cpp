@@ -231,6 +231,88 @@ void PaintRgb32Frame(HWND hwnd, const std::vector<BYTE>& bytes, UINT32 width, UI
     ReleaseDC(hwnd, dc);
 }
 
+void PaintDiagnosticPattern(HWND hwnd, const wchar_t* message)
+{
+    if (hwnd == nullptr) {
+        return;
+    }
+
+    RECT client = {};
+    if (!GetClientRect(hwnd, &client)) {
+        return;
+    }
+
+    HDC dc = GetDC(hwnd);
+    if (dc == nullptr) {
+        return;
+    }
+
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    const COLORREF colors[] = {
+        RGB(32, 32, 32),
+        RGB(200, 30, 30),
+        RGB(30, 150, 50),
+        RGB(30, 90, 210),
+        RGB(220, 190, 40),
+    };
+
+    for (int i = 0; i < static_cast<int>(ARRAYSIZE(colors)); ++i) {
+        RECT band = client;
+        band.left = i * width / static_cast<int>(ARRAYSIZE(colors));
+        band.right = (i + 1) * width / static_cast<int>(ARRAYSIZE(colors));
+        HBRUSH brush = CreateSolidBrush(colors[i]);
+        if (brush != nullptr) {
+            FillRect(dc, &band, brush);
+            DeleteObject(brush);
+        }
+    }
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    HFONT font = CreateFontW(
+        28,
+        0,
+        0,
+        0,
+        FW_SEMIBOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        L"Segoe UI");
+
+    HGDIOBJ oldFont = nullptr;
+    if (font != nullptr) {
+        oldFont = SelectObject(dc, font);
+    }
+
+    RECT textRect = client;
+    textRect.left += 24;
+    textRect.right -= 24;
+    textRect.top += 24;
+    DrawTextW(dc, message, -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    if (oldFont != nullptr) {
+        SelectObject(dc, oldFont);
+    }
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+
+    ReleaseDC(hwnd, dc);
+}
+
+void PaintDiagnosticPatternOnVideoAndParent(HWND hwnd, const wchar_t* message)
+{
+    PaintDiagnosticPattern(hwnd, message);
+    PaintDiagnosticPattern(GetParent(hwnd), message);
+}
+
 } // namespace
 
 SourceReaderD3D11Player::SourceReaderD3D11Player() = default;
@@ -253,6 +335,7 @@ HRESULT SourceReaderD3D11Player::Start(HWND hwndVideo, const VideoStartOptions& 
 
     hwndVideo_ = hwndVideo;
     Log::Write(L"SourceReader fallback requested. Device match='%s'", options.deviceMatch.c_str());
+    PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader backend starting...");
 
     LOG_IF_FAILED(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
 
@@ -283,9 +366,12 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHResult(L"CoInitializeEx(SourceReader thread)", hr);
+        PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: CoInitializeEx");
         running_.store(false);
         return;
     }
+
+    PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader opening UVC device...");
 
     Microsoft::WRL::ComPtr<IMFMediaSource> mediaSource;
     Microsoft::WRL::ComPtr<IMFSourceReader> sourceReader;
@@ -296,12 +382,14 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         hr = enumerator.FindBestMatch(options.deviceMatch, selectedDevice);
         if (FAILED(hr)) {
             LogHResult(L"UvcDeviceEnumerator::FindBestMatch(SourceReader)", hr);
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: UVC device not found");
             break;
         }
 
         hr = selectedDevice.activate->ActivateObject(IID_PPV_ARGS(&mediaSource));
         if (FAILED(hr)) {
             LogHResult(L"IMFActivate::ActivateObject(IMFMediaSource)", hr);
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: ActivateObject(IMFMediaSource)");
             break;
         }
 
@@ -318,6 +406,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         hr = MFCreateSourceReaderFromMediaSource(mediaSource.Get(), attributes.Get(), &sourceReader);
         if (FAILED(hr)) {
             LogHResult(L"MFCreateSourceReaderFromMediaSource", hr);
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: MFCreateSourceReaderFromMediaSource");
             break;
         }
 
@@ -332,11 +421,13 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         UINT32 frameHeight = 0;
         hr = SelectNativeVideoType(sourceReader.Get(), options.preferH264, frameWidth, frameHeight);
         if (FAILED(hr)) {
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: selecting native video type");
             break;
         }
 
         hr = ConfigureRgb32Output(sourceReader.Get(), frameWidth, frameHeight);
         if (FAILED(hr)) {
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: configuring RGB32 decoder output");
             break;
         }
 
@@ -362,6 +453,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                 &sample);
             if (FAILED(hr)) {
                 LogHResult(L"IMFSourceReader::ReadSample(video)", hr);
+                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: ReadSample(video)");
                 break;
             }
 
@@ -386,6 +478,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
             hr = CopySampleToVector(sample.Get(), frameBytes);
             if (FAILED(hr)) {
+                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: copying decoded RGB32 frame");
                 break;
             }
 

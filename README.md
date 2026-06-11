@@ -65,6 +65,7 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend sour
 - UVC enumeration through Media Foundation device sources.
 - UAC enumeration through MMDevice API.
 - Media Foundation Capture Engine preview player.
+- Source Reader diagnostic backend that paints a visible test pattern before frame delivery and logs decoded frame counts.
 - WASAPI PCM capture-to-render relay.
 - Thread-safe mute state that keeps consuming capture data.
 - OutputDebugStringW logging for device discovery, formats, and HRESULT failures.
@@ -80,7 +81,7 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend sour
 - `CoCreateInstance(CLSID_MFCaptureEngine) failed: 0x80004002 (No such interface supported)` means the app could not obtain `IMFCaptureEngine` before opening the UVC device. The code now first tries `IMFCaptureEngineClassFactory::CreateInstance`, then falls back to direct `CLSID_MFCaptureEngine` creation and logs both HRESULT values.
 - If Capture Engine creation still fails, verify the machine is a full Windows 10/11 desktop install with Media Foundation components available. Windows N/KN editions may require the Media Feature Pack.
 - If Capture Engine creation succeeds but `IMFCaptureEngine::Initialize` fails, investigate device selection, camera privacy settings, device occupation by another process, UVC driver behavior, and supported media types.
-- If `Capture Engine preview started` appears but the window stays black, first try `--video-format auto --preview-sink default`. Then compare `--preview-sink add-stream` and `--preview-sink rgb32`. If those stay blank, try `--video-backend source-reader` to verify whether frames can be read and decoded outside Capture Engine preview.
+- If `Capture Engine preview started` appears but the window stays black, first try `--video-format auto --preview-sink default`. Then compare `--preview-sink add-stream` and `--preview-sink rgb32`. If those stay blank, try `--video-backend source-reader`; it should first paint colored diagnostic bars. If colored bars are visible but video is not, inspect the Source Reader media type and `ReadSample` logs. If colored bars are not visible, the issue is in the Win32 child-window presentation path rather than UVC decode.
 - For deeper Media Foundation diagnostics, run:
 
 ```bat

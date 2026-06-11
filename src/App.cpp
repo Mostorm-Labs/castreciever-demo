@@ -50,9 +50,7 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
     hr = audioPlayer_->Start(options.uacMatch);
     if (FAILED(hr)) {
         LogHResult(L"IAudioPlayer::Start", hr);
-        videoPlayer_->Stop();
-        mainWindow_->Destroy();
-        return hr;
+        Log::Write(L"Audio startup failed; continuing video-only so the receiver window stays available for diagnostics.");
     }
 
     initialized_ = true;
