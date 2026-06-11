@@ -5,13 +5,68 @@
 #include "audio/IAudioPlayer.h"
 #include "video/IVideoPlayer.h"
 
+#include <algorithm>
 #include <strsafe.h>
+#include <windowsx.h>
 
 namespace {
 
 constexpr wchar_t kMainWindowClassName[] = L"UsbCastReceiverMainWindow";
 constexpr wchar_t kVideoWindowClassName[] = L"UsbCastReceiverVideoWindow";
 constexpr wchar_t kSelfTestPaintProperty[] = L"UsbCastReceiverSelfTestPaint";
+constexpr int kMinWindowWidth = 480;
+constexpr int kMinWindowHeight = 270;
+constexpr int kResizeBorderWidth = 8;
+
+POINT ScreenPointFromLParam(LPARAM lParam)
+{
+    return POINT { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+}
+
+LRESULT HitTestBorderlessWindow(HWND hwnd, POINT point)
+{
+    if (IsZoomed(hwnd)) {
+        return HTCLIENT;
+    }
+
+    RECT window = {};
+    if (!GetWindowRect(hwnd, &window)) {
+        return HTCLIENT;
+    }
+
+    const int resizeBorderWidth = std::max(kResizeBorderWidth, GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER));
+    const bool left = point.x >= window.left && point.x < window.left + resizeBorderWidth;
+    const bool right = point.x < window.right && point.x >= window.right - resizeBorderWidth;
+    const bool top = point.y >= window.top && point.y < window.top + resizeBorderWidth;
+    const bool bottom = point.y < window.bottom && point.y >= window.bottom - resizeBorderWidth;
+
+    if (top && left) {
+        return HTTOPLEFT;
+    }
+    if (top && right) {
+        return HTTOPRIGHT;
+    }
+    if (bottom && left) {
+        return HTBOTTOMLEFT;
+    }
+    if (bottom && right) {
+        return HTBOTTOMRIGHT;
+    }
+    if (left) {
+        return HTLEFT;
+    }
+    if (right) {
+        return HTRIGHT;
+    }
+    if (top) {
+        return HTTOP;
+    }
+    if (bottom) {
+        return HTBOTTOM;
+    }
+
+    return HTCAPTION;
+}
 
 void PaintSelfTestPattern(HWND hwnd, HDC dc, const wchar_t* label)
 {
@@ -45,6 +100,9 @@ void PaintSelfTestPattern(HWND hwnd, HDC dc, const wchar_t* label)
 LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message) {
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+
     case WM_ERASEBKGND:
         return 1;
 
@@ -81,10 +139,10 @@ HRESULT MainWindow::Create(HINSTANCE instance, int showCommand, IVideoPlayer* vi
     RETURN_IF_FAILED_LOG(RegisterWindowClass(), L"MainWindow::RegisterWindowClass");
 
     hwnd_ = CreateWindowExW(
-        0,
+        WS_EX_APPWINDOW,
         kMainWindowClassName,
         L"USB Cast Receiver",
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        WS_POPUP | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         1280,
@@ -318,10 +376,23 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_GETMINMAXINFO:
         if (lParam != 0) {
             auto* minMaxInfo = reinterpret_cast<MINMAXINFO*>(lParam);
-            minMaxInfo->ptMinTrackSize.x = 480;
-            minMaxInfo->ptMinTrackSize.y = 270;
+            minMaxInfo->ptMinTrackSize.x = kMinWindowWidth;
+            minMaxInfo->ptMinTrackSize.y = kMinWindowHeight;
+
+            HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO monitorInfo = {};
+            monitorInfo.cbSize = sizeof(monitorInfo);
+            if (GetMonitorInfoW(monitor, &monitorInfo)) {
+                minMaxInfo->ptMaxPosition.x = 0;
+                minMaxInfo->ptMaxPosition.y = 0;
+                minMaxInfo->ptMaxSize.x = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+                minMaxInfo->ptMaxSize.y = monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+            }
         }
         return 0;
+
+    case WM_NCHITTEST:
+        return HitTestBorderlessWindow(hwnd, ScreenPointFromLParam(lParam));
 
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
