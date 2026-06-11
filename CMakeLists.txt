@@ -36,6 +36,7 @@ target_link_libraries(UsbCastReceiver PRIVATE
     mf
     mfreadwrite
     mfuuid
+    wmcodecdspuuid
     d3d11
     dxgi
     user32

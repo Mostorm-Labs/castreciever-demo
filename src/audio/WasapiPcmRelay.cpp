@@ -6,12 +6,18 @@
 
 #include <audioclient.h>
 #include <avrt.h>
+#include <mfapi.h>
+#include <mferror.h>
+#include <mftransform.h>
+#include <mmreg.h>
 #include <mmdeviceapi.h>
+#include <wmcodecdsp.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -25,6 +31,288 @@ struct CoTaskMemFreeDeleter {
 };
 
 using WaveFormatPtr = std::unique_ptr<WAVEFORMATEX, CoTaskMemFreeDeleter>;
+
+struct AudioFormatDescription {
+    GUID subtype = GUID_NULL;
+    UINT32 channels = 0;
+    UINT32 sampleRate = 0;
+    UINT32 bitsPerSample = 0;
+    UINT32 validBitsPerSample = 0;
+    UINT32 blockAlign = 0;
+    UINT32 avgBytesPerSecond = 0;
+    UINT32 channelMask = 0;
+};
+
+bool TryDescribeWaveFormat(const WAVEFORMATEX* format, AudioFormatDescription& description)
+{
+    if (format == nullptr) {
+        return false;
+    }
+
+    description.channels = format->nChannels;
+    description.sampleRate = format->nSamplesPerSec;
+    description.bitsPerSample = format->wBitsPerSample;
+    description.validBitsPerSample = format->wBitsPerSample;
+    description.blockAlign = format->nBlockAlign;
+    description.avgBytesPerSecond = format->nAvgBytesPerSec;
+
+    if (format->wFormatTag == WAVE_FORMAT_PCM) {
+        description.subtype = MFAudioFormat_PCM;
+    } else if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+        description.subtype = MFAudioFormat_Float;
+    } else if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+        format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+        description.subtype = extensible->SubFormat;
+        description.channelMask = extensible->dwChannelMask;
+        if (extensible->Samples.wValidBitsPerSample != 0) {
+            description.validBitsPerSample = extensible->Samples.wValidBitsPerSample;
+        }
+    } else {
+        return false;
+    }
+
+    if (description.channelMask == 0) {
+        if (description.channels == 1) {
+            description.channelMask = SPEAKER_FRONT_CENTER;
+        } else if (description.channels == 2) {
+            description.channelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+        }
+    }
+
+    return description.subtype == MFAudioFormat_PCM || description.subtype == MFAudioFormat_Float;
+}
+
+bool AreWaveFormatsEquivalent(const WAVEFORMATEX* left, const WAVEFORMATEX* right)
+{
+    AudioFormatDescription leftDescription;
+    AudioFormatDescription rightDescription;
+    if (!TryDescribeWaveFormat(left, leftDescription) || !TryDescribeWaveFormat(right, rightDescription)) {
+        return false;
+    }
+
+    return leftDescription.subtype == rightDescription.subtype &&
+        leftDescription.channels == rightDescription.channels &&
+        leftDescription.sampleRate == rightDescription.sampleRate &&
+        leftDescription.bitsPerSample == rightDescription.bitsPerSample &&
+        leftDescription.validBitsPerSample == rightDescription.validBitsPerSample &&
+        leftDescription.blockAlign == rightDescription.blockAlign;
+}
+
+HRESULT CreateAudioMediaType(const WAVEFORMATEX* format, IMFMediaType** mediaType)
+{
+    if (mediaType == nullptr) {
+        return E_POINTER;
+    }
+    *mediaType = nullptr;
+
+    AudioFormatDescription description;
+    if (!TryDescribeWaveFormat(format, description)) {
+        Log::Write(L"Unsupported audio format for Media Foundation resampler. formatTag=0x%04X", format ? format->wFormatTag : 0);
+        return MF_E_INVALIDMEDIATYPE;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaType> type;
+    RETURN_IF_FAILED_LOG(MFCreateMediaType(&type), L"MFCreateMediaType(audio)");
+    RETURN_IF_FAILED_LOG(type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio), L"IMFMediaType::SetGUID(MF_MT_MAJOR_TYPE audio)");
+    RETURN_IF_FAILED_LOG(type->SetGUID(MF_MT_SUBTYPE, description.subtype), L"IMFMediaType::SetGUID(MF_MT_SUBTYPE audio)");
+    RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, description.channels), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_NUM_CHANNELS)");
+    RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, description.sampleRate), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND)");
+    RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, description.blockAlign), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT)");
+    RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, description.avgBytesPerSecond), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND)");
+    RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, description.bitsPerSample), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE)");
+    RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE), L"IMFMediaType::SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT audio)");
+
+    if (description.validBitsPerSample != 0 && description.validBitsPerSample != description.bitsPerSample) {
+        RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_VALID_BITS_PER_SAMPLE, description.validBitsPerSample), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_VALID_BITS_PER_SAMPLE)");
+    }
+
+    if (description.channelMask != 0) {
+        RETURN_IF_FAILED_LOG(type->SetUINT32(MF_MT_AUDIO_CHANNEL_MASK, description.channelMask), L"IMFMediaType::SetUINT32(MF_MT_AUDIO_CHANNEL_MASK)");
+    }
+
+    *mediaType = type.Detach();
+    return S_OK;
+}
+
+HRESULT CreateSampleFromBytes(const BYTE* data, DWORD byteCount, IMFSample** sample)
+{
+    if (sample == nullptr) {
+        return E_POINTER;
+    }
+    *sample = nullptr;
+
+    if (data == nullptr || byteCount == 0) {
+        return E_INVALIDARG;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    RETURN_IF_FAILED_LOG(MFCreateMemoryBuffer(byteCount, &buffer), L"MFCreateMemoryBuffer(input audio)");
+
+    BYTE* destination = nullptr;
+    DWORD maxLength = 0;
+    RETURN_IF_FAILED_LOG(buffer->Lock(&destination, &maxLength, nullptr), L"IMFMediaBuffer::Lock(input audio)");
+
+    if (byteCount > maxLength) {
+        buffer->Unlock();
+        return E_UNEXPECTED;
+    }
+
+    if (byteCount != 0) {
+        std::memcpy(destination, data, byteCount);
+    }
+
+    RETURN_IF_FAILED_LOG(buffer->Unlock(), L"IMFMediaBuffer::Unlock(input audio)");
+    RETURN_IF_FAILED_LOG(buffer->SetCurrentLength(byteCount), L"IMFMediaBuffer::SetCurrentLength(input audio)");
+
+    Microsoft::WRL::ComPtr<IMFSample> createdSample;
+    RETURN_IF_FAILED_LOG(MFCreateSample(&createdSample), L"MFCreateSample(input audio)");
+    RETURN_IF_FAILED_LOG(createdSample->AddBuffer(buffer.Get()), L"IMFSample::AddBuffer(input audio)");
+
+    *sample = createdSample.Detach();
+    return S_OK;
+}
+
+HRESULT AppendSampleBytes(IMFSample* sample, std::vector<BYTE>& output)
+{
+    if (sample == nullptr) {
+        return E_POINTER;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    RETURN_IF_FAILED_LOG(sample->ConvertToContiguousBuffer(&buffer), L"IMFSample::ConvertToContiguousBuffer(resampler output)");
+
+    BYTE* data = nullptr;
+    DWORD maxLength = 0;
+    DWORD currentLength = 0;
+    RETURN_IF_FAILED_LOG(buffer->Lock(&data, &maxLength, &currentLength), L"IMFMediaBuffer::Lock(resampler output)");
+
+    const size_t originalSize = output.size();
+    output.resize(originalSize + currentLength);
+    if (currentLength != 0) {
+        std::memcpy(output.data() + originalSize, data, currentLength);
+    }
+
+    RETURN_IF_FAILED_LOG(buffer->Unlock(), L"IMFMediaBuffer::Unlock(resampler output)");
+    return S_OK;
+}
+
+class MfAudioResampler {
+public:
+    HRESULT Initialize(const WAVEFORMATEX* inputFormat, const WAVEFORMATEX* outputFormat)
+    {
+        inputFormat_ = {};
+        outputFormat_ = {};
+
+        if (!TryDescribeWaveFormat(inputFormat, inputFormat_) ||
+            !TryDescribeWaveFormat(outputFormat, outputFormat_)) {
+            return MF_E_INVALIDMEDIATYPE;
+        }
+
+        Microsoft::WRL::ComPtr<IUnknown> unknown;
+        RETURN_IF_FAILED_LOG(
+            CoCreateInstance(CLSID_CResamplerMediaObject, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&unknown)),
+            L"CoCreateInstance(CLSID_CResamplerMediaObject)");
+
+        Microsoft::WRL::ComPtr<IWMResamplerProps> resamplerProps;
+        if (SUCCEEDED(unknown.As(&resamplerProps))) {
+            LOG_IF_FAILED(resamplerProps->SetHalfFilterLength(60), L"IWMResamplerProps::SetHalfFilterLength");
+        }
+
+        RETURN_IF_FAILED_LOG(unknown.As(&transform_), L"Query IMFTransform from Audio Resampler DSP");
+
+        Microsoft::WRL::ComPtr<IMFMediaType> inputType;
+        Microsoft::WRL::ComPtr<IMFMediaType> outputType;
+        RETURN_IF_FAILED_LOG(CreateAudioMediaType(inputFormat, &inputType), L"CreateAudioMediaType(input)");
+        RETURN_IF_FAILED_LOG(CreateAudioMediaType(outputFormat, &outputType), L"CreateAudioMediaType(output)");
+
+        RETURN_IF_FAILED_LOG(transform_->SetInputType(0, inputType.Get(), 0), L"IMFTransform::SetInputType(resampler)");
+        RETURN_IF_FAILED_LOG(transform_->SetOutputType(0, outputType.Get(), 0), L"IMFTransform::SetOutputType(resampler)");
+        RETURN_IF_FAILED_LOG(transform_->GetOutputStreamInfo(0, &outputStreamInfo_), L"IMFTransform::GetOutputStreamInfo(resampler)");
+
+        LOG_IF_FAILED(transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0), L"IMFTransform::ProcessMessage(FLUSH resampler)");
+        RETURN_IF_FAILED_LOG(transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0), L"IMFTransform::ProcessMessage(BEGIN_STREAMING resampler)");
+        RETURN_IF_FAILED_LOG(transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0), L"IMFTransform::ProcessMessage(START_OF_STREAM resampler)");
+
+        Log::Write(L"Audio resampler enabled: %u Hz/%u ch/%u-bit -> %u Hz/%u ch/%u-bit",
+            inputFormat_.sampleRate,
+            inputFormat_.channels,
+            inputFormat_.bitsPerSample,
+            outputFormat_.sampleRate,
+            outputFormat_.channels,
+            outputFormat_.bitsPerSample);
+        return S_OK;
+    }
+
+    HRESULT Process(const BYTE* inputData, UINT32 inputBytes, std::vector<BYTE>& output)
+    {
+        output.clear();
+
+        if (!transform_) {
+            return E_UNEXPECTED;
+        }
+
+        Microsoft::WRL::ComPtr<IMFSample> inputSample;
+        RETURN_IF_FAILED_LOG(CreateSampleFromBytes(inputData, inputBytes, &inputSample), L"CreateSampleFromBytes(resampler)");
+
+        HRESULT hr = transform_->ProcessInput(0, inputSample.Get(), 0);
+        if (hr == MF_E_NOTACCEPTING) {
+            RETURN_IF_FAILED_LOG(DrainAvailableOutput(output), L"MfAudioResampler::DrainAvailableOutput(before retry)");
+            hr = transform_->ProcessInput(0, inputSample.Get(), 0);
+        }
+
+        if (FAILED(hr)) {
+            LogHResult(L"IMFTransform::ProcessInput(resampler)", hr);
+            return hr;
+        }
+
+        RETURN_IF_FAILED_LOG(DrainAvailableOutput(output), L"MfAudioResampler::DrainAvailableOutput");
+        return S_OK;
+    }
+
+private:
+    HRESULT DrainAvailableOutput(std::vector<BYTE>& output)
+    {
+        while (true) {
+            const DWORD estimatedOutputBytes =
+                static_cast<DWORD>(((static_cast<unsigned long long>(outputFormat_.avgBytesPerSecond) / 10) + outputFormat_.blockAlign - 1) /
+                    outputFormat_.blockAlign * outputFormat_.blockAlign);
+            const DWORD bufferBytes = std::max<DWORD>(outputStreamInfo_.cbSize, std::max<DWORD>(estimatedOutputBytes, outputFormat_.blockAlign * 1024));
+
+            Microsoft::WRL::ComPtr<IMFMediaBuffer> outputBuffer;
+            RETURN_IF_FAILED_LOG(MFCreateMemoryBuffer(bufferBytes, &outputBuffer), L"MFCreateMemoryBuffer(resampler output)");
+
+            Microsoft::WRL::ComPtr<IMFSample> outputSample;
+            RETURN_IF_FAILED_LOG(MFCreateSample(&outputSample), L"MFCreateSample(resampler output)");
+            RETURN_IF_FAILED_LOG(outputSample->AddBuffer(outputBuffer.Get()), L"IMFSample::AddBuffer(resampler output)");
+
+            MFT_OUTPUT_DATA_BUFFER outputData = {};
+            outputData.dwStreamID = 0;
+            outputData.pSample = outputSample.Get();
+
+            DWORD status = 0;
+            const HRESULT hr = transform_->ProcessOutput(0, 1, &outputData, &status);
+            if (outputData.pEvents != nullptr) {
+                outputData.pEvents->Release();
+            }
+
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                return S_OK;
+            }
+            if (FAILED(hr)) {
+                LogHResult(L"IMFTransform::ProcessOutput(resampler)", hr);
+                return hr;
+            }
+
+            RETURN_IF_FAILED_LOG(AppendSampleBytes(outputSample.Get(), output), L"AppendSampleBytes(resampler output)");
+        }
+    }
+
+    Microsoft::WRL::ComPtr<IMFTransform> transform_;
+    MFT_OUTPUT_STREAM_INFO outputStreamInfo_ = {};
+    AudioFormatDescription inputFormat_;
+    AudioFormatDescription outputFormat_;
+};
 
 void LogWaveFormat(const wchar_t* prefix, const WAVEFORMATEX* format)
 {
@@ -103,6 +391,17 @@ HRESULT CopyCaptureToRender(
     }
 
     return S_OK;
+}
+
+UINT32 EstimateRenderFramesForCaptureFrames(UINT32 captureFrames, const WAVEFORMATEX* captureFormat, const WAVEFORMATEX* renderFormat)
+{
+    if (captureFormat == nullptr || renderFormat == nullptr || captureFormat->nSamplesPerSec == 0) {
+        return captureFrames;
+    }
+
+    const auto numerator = static_cast<unsigned long long>(captureFrames) * renderFormat->nSamplesPerSec;
+    const UINT32 frames = static_cast<UINT32>((numerator + captureFormat->nSamplesPerSec - 1) / captureFormat->nSamplesPerSec);
+    return std::max<UINT32>(frames, 1);
 }
 
 } // namespace
@@ -205,6 +504,9 @@ void WasapiPcmRelay::WorkerThread()
     Microsoft::WRL::ComPtr<IAudioRenderClient> renderClient;
     UINT32 renderBufferFrames = 0;
     WaveFormatPtr captureFormat;
+    WaveFormatPtr renderFormat;
+    MfAudioResampler resampler;
+    bool useResampler = false;
 
     do {
         UacDeviceEnumerator uacEnumerator;
@@ -250,21 +552,41 @@ void WasapiPcmRelay::WorkerThread()
         captureFormat.reset(rawCaptureFormat);
         LogWaveFormat(L"UAC capture format", captureFormat.get());
 
+        WAVEFORMATEX* rawRenderFormat = nullptr;
+        hr = renderAudioClient->GetMixFormat(&rawRenderFormat);
+        if (FAILED(hr)) {
+            LogHResult(L"IAudioClient::GetMixFormat(render)", hr);
+            break;
+        }
+        renderFormat.reset(rawRenderFormat);
+        LogWaveFormat(L"Default render mix format", renderFormat.get());
+
         WAVEFORMATEX* closestFormat = nullptr;
-        hr = renderAudioClient->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, captureFormat.get(), &closestFormat);
+        hr = renderAudioClient->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, renderFormat.get(), &closestFormat);
         if (closestFormat != nullptr) {
             LogWaveFormat(L"Closest render format", closestFormat);
             CoTaskMemFree(closestFormat);
         }
 
         if (hr == S_FALSE) {
-            Log::Write(L"Default render endpoint does not support the capture PCM format. Resampler is not implemented in this PoC.");
+            Log::Write(L"Default render endpoint does not support its own mix format.");
             hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
             break;
         }
         if (FAILED(hr)) {
             LogHResult(L"IAudioClient::IsFormatSupported(render)", hr);
             break;
+        }
+
+        useResampler = !AreWaveFormatsEquivalent(captureFormat.get(), renderFormat.get());
+        if (useResampler) {
+            hr = resampler.Initialize(captureFormat.get(), renderFormat.get());
+            if (FAILED(hr)) {
+                LogHResult(L"MfAudioResampler::Initialize", hr);
+                break;
+            }
+        } else {
+            Log::Write(L"Capture and render formats match. WASAPI relay will write PCM directly.");
         }
 
         hr = captureAudioClient->Initialize(
@@ -284,7 +606,7 @@ void WasapiPcmRelay::WorkerThread()
             0,
             kBufferDurationHns,
             0,
-            captureFormat.get(),
+            renderFormat.get(),
             nullptr);
         if (FAILED(hr)) {
             LogHResult(L"IAudioClient::Initialize(render)", hr);
@@ -369,15 +691,48 @@ void WasapiPcmRelay::WorkerThread()
                 }
 
                 const bool silent = muted_.load() || (captureFlags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-                hr = CopyCaptureToRender(
-                    renderClient.Get(),
-                    renderAudioClient.Get(),
-                    renderBufferFrames,
-                    silent ? nullptr : captureData,
-                    framesAvailable,
-                    captureFormat->nBlockAlign,
-                    silent,
-                    running_);
+                if (useResampler) {
+                    if (silent) {
+                        const UINT32 renderFrames = EstimateRenderFramesForCaptureFrames(framesAvailable, captureFormat.get(), renderFormat.get());
+                        hr = CopyCaptureToRender(
+                            renderClient.Get(),
+                            renderAudioClient.Get(),
+                            renderBufferFrames,
+                            nullptr,
+                            renderFrames,
+                            renderFormat->nBlockAlign,
+                            true,
+                            running_);
+                    } else {
+                        std::vector<BYTE> convertedAudio;
+                        hr = resampler.Process(
+                            captureData,
+                            framesAvailable * captureFormat->nBlockAlign,
+                            convertedAudio);
+                        if (SUCCEEDED(hr) && !convertedAudio.empty()) {
+                            const UINT32 convertedFrames = static_cast<UINT32>(convertedAudio.size() / renderFormat->nBlockAlign);
+                            hr = CopyCaptureToRender(
+                                renderClient.Get(),
+                                renderAudioClient.Get(),
+                                renderBufferFrames,
+                                convertedAudio.data(),
+                                convertedFrames,
+                                renderFormat->nBlockAlign,
+                                false,
+                                running_);
+                        }
+                    }
+                } else {
+                    hr = CopyCaptureToRender(
+                        renderClient.Get(),
+                        renderAudioClient.Get(),
+                        renderBufferFrames,
+                        silent ? nullptr : captureData,
+                        framesAvailable,
+                        renderFormat->nBlockAlign,
+                        silent,
+                        running_);
+                }
 
                 const HRESULT releaseHr = captureClient->ReleaseBuffer(framesAvailable);
                 if (FAILED(releaseHr)) {
