@@ -26,6 +26,15 @@ AppOptions ParseCommandLine()
             options.uvcMatch = argv[++i];
         } else if (arg == L"--uac-match" && i + 1 < argc) {
             options.uacMatch = argv[++i];
+        } else if (arg == L"--video-backend" && i + 1 < argc) {
+            const std::wstring value = argv[++i];
+            if (value == L"capture") {
+                options.videoBackend = VideoBackend::CaptureEngine;
+            } else if (value == L"source-reader") {
+                options.videoBackend = VideoBackend::SourceReader;
+            } else {
+                Log::Write(L"Unknown --video-backend value ignored: %s", value.c_str());
+            }
         } else if (arg == L"--video-format" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"auto") {
@@ -73,9 +82,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     }
 
     const AppOptions options = ParseCommandLine();
-    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s', video-format='%s', preview-sink='%d'",
+    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s', video-backend='%s', video-format='%s', preview-sink='%d'",
         options.uvcMatch.c_str(),
         options.uacMatch.c_str(),
+        options.videoBackend == VideoBackend::SourceReader ? L"source-reader" : L"capture",
         options.preferH264 ? L"h264" : L"auto",
         static_cast<int>(options.previewSinkMode));
 

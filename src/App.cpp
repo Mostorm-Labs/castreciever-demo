@@ -6,6 +6,7 @@
 #include "audio/WasapiPcmRelay.h"
 #include "video/IVideoPlayer.h"
 #include "video/MfCapturePreviewPlayer.h"
+#include "video/SourceReaderD3D11Player.h"
 
 #include <memory>
 
@@ -22,7 +23,11 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
         return S_OK;
     }
 
-    videoPlayer_ = std::make_unique<MfCapturePreviewPlayer>();
+    if (options.videoBackend == VideoBackend::SourceReader) {
+        videoPlayer_ = std::make_unique<SourceReaderD3D11Player>();
+    } else {
+        videoPlayer_ = std::make_unique<MfCapturePreviewPlayer>();
+    }
     audioPlayer_ = std::make_unique<WasapiPcmRelay>();
     mainWindow_ = std::make_unique<MainWindow>();
 

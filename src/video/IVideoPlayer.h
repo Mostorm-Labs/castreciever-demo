@@ -10,6 +10,11 @@ enum class PreviewSinkMode {
     Rgb32AddStream,
 };
 
+enum class VideoBackend {
+    CaptureEngine,
+    SourceReader,
+};
+
 struct VideoStartOptions {
     std::wstring deviceMatch;
     bool preferH264 = true;
