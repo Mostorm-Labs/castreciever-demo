@@ -27,6 +27,6 @@ inline bool ContainsCaseInsensitive(const std::wstring& value, const std::wstrin
 inline std::wstring GuidToString(REFGUID guid)
 {
     wchar_t buffer[64] = {};
-    StringFromGUID2(guid, buffer, static_cast<int>(_countof(buffer)));
+    StringFromGUID2(guid, buffer, static_cast<int>(ARRAYSIZE(buffer)));
     return buffer;
 }

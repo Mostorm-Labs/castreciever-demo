@@ -32,7 +32,7 @@ inline std::wstring HResultToString(HRESULT hr)
         LocalFree(message);
     } else {
         wchar_t buffer[64] = {};
-        StringCchPrintfW(buffer, _countof(buffer), L"0x%08X", static_cast<unsigned int>(hr));
+        StringCchPrintfW(buffer, ARRAYSIZE(buffer), L"0x%08X", static_cast<unsigned int>(hr));
         result = buffer;
     }
 

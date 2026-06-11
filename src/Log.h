@@ -13,7 +13,7 @@ inline void Write(const wchar_t* format, ...)
 
     va_list args;
     va_start(args, format);
-    StringCchVPrintfW(buffer, _countof(buffer), format, args);
+    StringCchVPrintfW(buffer, ARRAYSIZE(buffer), format, args);
     va_end(args);
 
     OutputDebugStringW(buffer);
