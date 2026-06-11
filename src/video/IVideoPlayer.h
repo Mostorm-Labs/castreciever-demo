@@ -13,6 +13,7 @@ enum class PreviewSinkMode {
 enum class VideoBackend {
     CaptureEngine,
     SourceReader,
+    SelfTest,
 };
 
 struct VideoStartOptions {

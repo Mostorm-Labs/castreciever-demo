@@ -11,6 +11,7 @@ namespace {
 
 constexpr wchar_t kMainWindowClassName[] = L"UsbCastReceiverMainWindow";
 constexpr wchar_t kVideoWindowClassName[] = L"UsbCastReceiverVideoWindow";
+constexpr wchar_t kSelfTestPaintProperty[] = L"UsbCastReceiverSelfTestPaint";
 
 LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -20,7 +21,34 @@ LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
     case WM_PAINT: {
         PAINTSTRUCT paint = {};
-        BeginPaint(hwnd, &paint);
+        HDC dc = BeginPaint(hwnd, &paint);
+        if (GetPropW(hwnd, kSelfTestPaintProperty) != nullptr) {
+            RECT client = {};
+            GetClientRect(hwnd, &client);
+            const COLORREF colors[] = {
+                RGB(255, 0, 0),
+                RGB(0, 180, 0),
+                RGB(0, 80, 255),
+                RGB(255, 220, 0),
+            };
+            const int width = client.right - client.left;
+            for (int i = 0; i < static_cast<int>(ARRAYSIZE(colors)); ++i) {
+                RECT band = client;
+                band.left = i * width / static_cast<int>(ARRAYSIZE(colors));
+                band.right = (i + 1) * width / static_cast<int>(ARRAYSIZE(colors));
+                HBRUSH brush = CreateSolidBrush(colors[i]);
+                if (brush != nullptr) {
+                    FillRect(dc, &band, brush);
+                    DeleteObject(brush);
+                }
+            }
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(255, 255, 255));
+            RECT textRect = client;
+            textRect.left += 16;
+            textRect.top += 16;
+            DrawTextW(dc, L"UsbCastReceiver video child window", -1, &textRect, DT_LEFT | DT_TOP | DT_NOPREFIX);
+        }
         EndPaint(hwnd, &paint);
         return 0;
     }
@@ -106,7 +134,7 @@ HRESULT MainWindow::RegisterWindowClass()
     videoWc.lpfnWndProc = VideoWindowProc;
     videoWc.hInstance = instance_;
     videoWc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    videoWc.hbrBackground = nullptr;
+    videoWc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     videoWc.lpszClassName = kVideoWindowClassName;
 
     if (RegisterClassExW(&videoWc) == 0) {

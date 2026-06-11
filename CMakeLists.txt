@@ -14,6 +14,7 @@ add_executable(UsbCastReceiver WIN32
     src/device/UacDeviceEnumerator.cpp
     src/video/MfCapturePreviewPlayer.cpp
     src/video/SourceReaderD3D11Player.cpp
+    src/video/SelfTestVideoPlayer.cpp
     src/audio/WasapiPcmRelay.cpp
     src/ui/OverlayControls.cpp
 )

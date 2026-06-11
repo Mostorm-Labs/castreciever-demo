@@ -6,6 +6,7 @@
 #include "audio/WasapiPcmRelay.h"
 #include "video/IVideoPlayer.h"
 #include "video/MfCapturePreviewPlayer.h"
+#include "video/SelfTestVideoPlayer.h"
 #include "video/SourceReaderD3D11Player.h"
 
 #include <memory>
@@ -23,7 +24,9 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
         return S_OK;
     }
 
-    if (options.videoBackend == VideoBackend::SourceReader) {
+    if (options.videoBackend == VideoBackend::SelfTest) {
+        videoPlayer_ = std::make_unique<SelfTestVideoPlayer>();
+    } else if (options.videoBackend == VideoBackend::SourceReader) {
         videoPlayer_ = std::make_unique<SourceReaderD3D11Player>();
     } else {
         videoPlayer_ = std::make_unique<MfCapturePreviewPlayer>();
@@ -47,10 +50,14 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
         return hr;
     }
 
-    hr = audioPlayer_->Start(options.uacMatch);
-    if (FAILED(hr)) {
-        LogHResult(L"IAudioPlayer::Start", hr);
-        Log::Write(L"Audio startup failed; continuing video-only so the receiver window stays available for diagnostics.");
+    if (options.videoBackend == VideoBackend::SelfTest) {
+        Log::Write(L"Self-test video backend selected; skipping audio startup.");
+    } else {
+        hr = audioPlayer_->Start(options.uacMatch);
+        if (FAILED(hr)) {
+            LogHResult(L"IAudioPlayer::Start", hr);
+            Log::Write(L"Audio startup failed; continuing video-only so the receiver window stays available for diagnostics.");
+        }
     }
 
     initialized_ = true;

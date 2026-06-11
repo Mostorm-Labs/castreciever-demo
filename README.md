@@ -53,9 +53,10 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-format auto 
 build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink add-stream
 build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink rgb32
 build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend source-reader
+build\Release\UsbCastReceiver.exe --video-backend self-test
 ```
 
-`--video-backend capture` is the default and uses Media Foundation Capture Engine preview. `--video-backend source-reader` bypasses Capture Engine preview and uses Source Reader to decode to RGB32 before drawing frames with a diagnostic GDI renderer. `--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets the selected backend choose. `--preview-sink default` is the default Capture Engine mode and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
+`--video-backend capture` is the default and uses Media Foundation Capture Engine preview. `--video-backend source-reader` bypasses Capture Engine preview and uses Source Reader to decode to RGB32 before drawing frames with a diagnostic GDI renderer. `--video-backend self-test` does not open any device; it only paints animated color bars into the video HWND to verify Win32 presentation. `--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets the selected backend choose. `--preview-sink default` is the default Capture Engine mode and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
 
 ## Implemented
 
@@ -81,7 +82,7 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend sour
 - `CoCreateInstance(CLSID_MFCaptureEngine) failed: 0x80004002 (No such interface supported)` means the app could not obtain `IMFCaptureEngine` before opening the UVC device. The code now first tries `IMFCaptureEngineClassFactory::CreateInstance`, then falls back to direct `CLSID_MFCaptureEngine` creation and logs both HRESULT values.
 - If Capture Engine creation still fails, verify the machine is a full Windows 10/11 desktop install with Media Foundation components available. Windows N/KN editions may require the Media Feature Pack.
 - If Capture Engine creation succeeds but `IMFCaptureEngine::Initialize` fails, investigate device selection, camera privacy settings, device occupation by another process, UVC driver behavior, and supported media types.
-- If `Capture Engine preview started` appears but the window stays black, first try `--video-format auto --preview-sink default`. Then compare `--preview-sink add-stream` and `--preview-sink rgb32`. If those stay blank, try `--video-backend source-reader`; it should first paint colored diagnostic bars. If colored bars are visible but video is not, inspect the Source Reader media type and `ReadSample` logs. If colored bars are not visible, the issue is in the Win32 child-window presentation path rather than UVC decode.
+- If the window stays blank, first run `--video-backend self-test`. If the animated color bars are not visible, the issue is in the launched binary, window parenting, or Win32 presentation path rather than UVC decode. If self-test works, try `--video-backend source-reader`; it should first paint colored diagnostic bars and then log decoded frames.
 - For deeper Media Foundation diagnostics, run:
 
 ```bat
