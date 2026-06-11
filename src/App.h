@@ -14,7 +14,7 @@ class IAudioPlayer;
 struct AppOptions {
     std::wstring uvcMatch;
     std::wstring uacMatch;
-    VideoBackend videoBackend = VideoBackend::CaptureEngine;
+    VideoBackend videoBackend = VideoBackend::SourceReader;
     bool preferH264 = true;
     PreviewSinkMode previewSinkMode = PreviewSinkMode::Default;
 };

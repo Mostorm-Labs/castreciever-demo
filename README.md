@@ -7,7 +7,7 @@ UsbCastReceiver is a Windows native proof-of-concept for a USB cast receiver dev
 Video:
 
 ```text
-UVC H.264 -> Media Foundation Capture Engine -> HWND preview
+UVC H.264 -> Media Foundation Source Reader -> system H.264 decoder -> RGB32 -> HWND blit
 ```
 
 Audio:
@@ -16,7 +16,7 @@ Audio:
 UAC PCM -> WASAPI capture -> WASAPI render
 ```
 
-The default video path uses Media Foundation Capture Engine preview directly against a child `HWND`. The `SourceReaderD3D11Player` fallback can be selected for diagnostics; it reads frames through Source Reader, asks Media Foundation to decode to RGB32, and draws with a simple GDI blitter. That confirms frame delivery before replacing the diagnostic blitter with a D3D11 renderer.
+The default video path uses Media Foundation Source Reader, asks Windows to decode the UVC H.264 stream to RGB32, and draws frames into the child `HWND` with a simple GDI blitter. This is the working path for the tested `Wireless transceiver NA20` device. The Capture Engine preview path is still available with `--video-backend capture`, but it is treated as experimental because some UVC driver stacks fail or stay blank even when Source Reader can pull frames.
 
 The audio path captures PCM from the selected UAC endpoint and writes it to the default render endpoint. Muting does not stop or reopen the capture device; the relay keeps draining capture buffers and writes silence to render.
 
@@ -50,15 +50,15 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --uac-match "audio n
 Video diagnostics:
 
 ```bat
-build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink default
-build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-format auto --preview-sink default
-build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink add-stream
-build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink rgb32
-build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend source-reader
+build\Release\UsbCastReceiver.exe --uvc-match "Wireless transceiver NA20 "
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend capture --preview-sink default
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend capture --video-format auto --preview-sink default
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend capture --preview-sink add-stream
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend capture --preview-sink rgb32
 build\Release\UsbCastReceiver.exe --video-backend self-test
 ```
 
-`--video-backend capture` is the default and uses Media Foundation Capture Engine preview. `--video-backend source-reader` bypasses Capture Engine preview and uses Source Reader to decode to RGB32 before drawing frames with a diagnostic GDI renderer. `--video-backend self-test` does not open any device; it only paints animated color bars into the video HWND to verify Win32 presentation. `--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets the selected backend choose. `--preview-sink default` is the default Capture Engine mode and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
+`--video-backend source-reader` is the default and uses Source Reader to decode to RGB32 before drawing frames with the current GDI renderer. `--video-backend capture` uses Media Foundation Capture Engine preview and is kept as an optional compatibility experiment. `--video-backend self-test` does not open any device; it only paints animated color bars into the video HWND to verify Win32 presentation. `--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets the selected backend choose. `--preview-sink default` is the default Capture Engine mode and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
 
 ## Implemented
 
@@ -67,8 +67,8 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - ESC restores a maximized window, otherwise closes the application.
 - UVC enumeration through Media Foundation device sources.
 - UAC enumeration through MMDevice API.
-- Media Foundation Capture Engine preview player.
-- Source Reader diagnostic backend that paints a visible test pattern before frame delivery and logs decoded frame counts.
+- Source Reader video backend that paints a visible test pattern before frame delivery and logs decoded frame counts.
+- Optional Media Foundation Capture Engine preview player.
 - WASAPI PCM capture-to-render relay.
 - Thread-safe mute state that keeps consuming capture data.
 - OutputDebugStringW logging for device discovery, formats, and HRESULT failures.
@@ -76,8 +76,8 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 ## Current Limits
 
 - If the UAC capture format differs from the default render mix format, the relay uses the Windows Audio Resampler DSP through Media Foundation. This covers common PCM/float sample-rate and channel-count differences, such as 16 kHz mono capture to 48 kHz stereo render.
-- Some UVC H.264 devices may not preview directly through Capture Engine on every driver stack. In that case, complete and switch to the Source Reader + H.264 Decoder MFT + D3D11 fallback path.
-- The current preview path relies on Capture Engine for decode, scheduling, and presentation. It does not expose frame-level statistics yet.
+- Some UVC H.264 devices may not preview directly through Capture Engine on every driver stack. Use the default Source Reader backend for those devices.
+- The current Source Reader renderer uses a CPU-visible RGB32 sample and GDI blit for reliability and diagnostics. Replace it with a D3D11 swap-chain renderer before treating it as the final performance path.
 
 ## Troubleshooting
 
@@ -94,7 +94,7 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 ## Performance Principles
 
 - No Electron, Chromium, or WebView render chain.
-- No per-frame CPU readback and GPU re-upload in the main path.
+- Keep the current Source Reader path allocation-stable; the next D3D11 renderer should remove the RGB32/GDI copy from the steady-state performance path.
 - Prefer Windows Media Foundation system H.264 decoding.
 - Use only a few Win32 controls for UI.
 - Avoid layered transparent windows to reduce extra DWM composition cost.
@@ -104,7 +104,7 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 
 ## TODO
 
-- Complete the Source Reader + D3D11 fallback renderer.
+- Replace the Source Reader GDI blitter with a D3D11 renderer.
 - Harden audio resampling with drift handling and glitch metrics.
 - Add audio/video sync and latency handling.
 - Add FPS, dropped-frame, and end-to-end latency statistics.

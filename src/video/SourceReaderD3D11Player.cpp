@@ -334,7 +334,7 @@ HRESULT SourceReaderD3D11Player::Start(HWND hwndVideo, const VideoStartOptions& 
     }
 
     hwndVideo_ = hwndVideo;
-    Log::Write(L"SourceReader fallback requested. Device match='%s'", options.deviceMatch.c_str());
+    Log::Write(L"SourceReader backend selected. Device match='%s'", options.deviceMatch.c_str());
     PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader backend starting...");
 
     LOG_IF_FAILED(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
@@ -552,6 +552,6 @@ HRESULT SourceReaderD3D11Player::InitializeD3D11()
         return hr;
     }
 
-    Log::Write(L"D3D11 fallback device created. Feature level=0x%04X", static_cast<unsigned int>(createdLevel));
+    Log::Write(L"D3D11 device created for future renderer path. Feature level=0x%04X", static_cast<unsigned int>(createdLevel));
     return S_OK;
 }
