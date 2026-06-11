@@ -10,10 +10,10 @@ SourceReaderD3D11Player::~SourceReaderD3D11Player()
     Stop();
 }
 
-HRESULT SourceReaderD3D11Player::Start(HWND hwndVideo, const std::wstring& deviceMatch)
+HRESULT SourceReaderD3D11Player::Start(HWND hwndVideo, const VideoStartOptions& options)
 {
     hwndVideo_ = hwndVideo;
-    Log::Write(L"SourceReaderD3D11Player fallback requested. Device match='%s'", deviceMatch.c_str());
+    Log::Write(L"SourceReaderD3D11Player fallback requested. Device match='%s'", options.deviceMatch.c_str());
 
     RETURN_IF_FAILED_LOG(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
 

@@ -11,7 +11,7 @@ public:
     SourceReaderD3D11Player();
     ~SourceReaderD3D11Player() override;
 
-    HRESULT Start(HWND hwndVideo, const std::wstring& deviceMatch) override;
+    HRESULT Start(HWND hwndVideo, const VideoStartOptions& options) override;
     void Stop() override;
     void Resize(UINT width, UINT height) override;
 

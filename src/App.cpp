@@ -30,7 +30,12 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
         mainWindow_->Create(instance, showCommand, videoPlayer_.get(), audioPlayer_.get()),
         L"MainWindow::Create");
 
-    HRESULT hr = videoPlayer_->Start(mainWindow_->VideoHwnd(), options.uvcMatch);
+    VideoStartOptions videoOptions;
+    videoOptions.deviceMatch = options.uvcMatch;
+    videoOptions.preferH264 = options.preferH264;
+    videoOptions.previewSinkMode = options.previewSinkMode;
+
+    HRESULT hr = videoPlayer_->Start(mainWindow_->VideoHwnd(), videoOptions);
     if (FAILED(hr)) {
         LogHResult(L"IVideoPlayer::Start", hr);
         mainWindow_->Destroy();

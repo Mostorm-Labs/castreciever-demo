@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+#include "video/IVideoPlayer.h"
+
 class MainWindow;
 class IVideoPlayer;
 class IAudioPlayer;
@@ -12,6 +14,8 @@ class IAudioPlayer;
 struct AppOptions {
     std::wstring uvcMatch;
     std::wstring uacMatch;
+    bool preferH264 = true;
+    PreviewSinkMode previewSinkMode = PreviewSinkMode::Default;
 };
 
 class App {

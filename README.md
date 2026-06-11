@@ -45,6 +45,17 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --uac-match "audio n
 
 `--uvc-match` is matched case-insensitively against the UVC friendly name and symbolic link. `--uac-match` is matched case-insensitively against the UAC friendly name and device id. If a match argument is omitted or empty, the first active endpoint of that type is selected.
 
+Video diagnostics:
+
+```bat
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink default
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-format auto --preview-sink default
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink add-stream
+build\Release\UsbCastReceiver.exe --uvc-match "camera name" --preview-sink rgb32
+```
+
+`--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets Capture Engine choose. `--preview-sink default` is the default and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
+
 ## Implemented
 
 - Win32 main window with a child video window.
@@ -68,7 +79,7 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --uac-match "audio n
 - `CoCreateInstance(CLSID_MFCaptureEngine) failed: 0x80004002 (No such interface supported)` means the app could not obtain `IMFCaptureEngine` before opening the UVC device. The code now first tries `IMFCaptureEngineClassFactory::CreateInstance`, then falls back to direct `CLSID_MFCaptureEngine` creation and logs both HRESULT values.
 - If Capture Engine creation still fails, verify the machine is a full Windows 10/11 desktop install with Media Foundation components available. Windows N/KN editions may require the Media Feature Pack.
 - If Capture Engine creation succeeds but `IMFCaptureEngine::Initialize` fails, investigate device selection, camera privacy settings, device occupation by another process, UVC driver behavior, and supported media types.
-- If `Capture Engine preview started` appears but the window stays black, compare whether the log says `Preview sink accepted auto-negotiated media type` or `Preview sink accepted RGB32 fallback media type`. The app uses a custom non-painting child video window so the Win32 UI does not cover the preview surface.
+- If `Capture Engine preview started` appears but the window stays black, first try `--video-format auto --preview-sink default`. Then compare `--preview-sink add-stream` and `--preview-sink rgb32`. The app uses a custom non-painting child video window so the Win32 UI does not cover the preview surface.
 - For deeper Media Foundation diagnostics, run:
 
 ```bat

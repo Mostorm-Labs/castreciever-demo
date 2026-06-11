@@ -13,14 +13,15 @@ public:
     MfCapturePreviewPlayer();
     ~MfCapturePreviewPlayer() override;
 
-    HRESULT Start(HWND hwndVideo, const std::wstring& deviceMatch) override;
+    HRESULT Start(HWND hwndVideo, const VideoStartOptions& options) override;
     void Stop() override;
     void Resize(UINT width, UINT height) override;
 
 private:
     class CaptureEngineCallback;
 
-    HRESULT ConfigureH264IfAvailable();
+    HRESULT ConfigureVideoMediaType(bool preferH264);
+    HRESULT ConfigurePreviewSink(PreviewSinkMode mode);
     HRESULT CreatePreviewMediaType(IMFMediaType** mediaType);
     void LogCurrentVideoTypes();
 

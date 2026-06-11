@@ -26,6 +26,26 @@ AppOptions ParseCommandLine()
             options.uvcMatch = argv[++i];
         } else if (arg == L"--uac-match" && i + 1 < argc) {
             options.uacMatch = argv[++i];
+        } else if (arg == L"--video-format" && i + 1 < argc) {
+            const std::wstring value = argv[++i];
+            if (value == L"auto") {
+                options.preferH264 = false;
+            } else if (value == L"h264") {
+                options.preferH264 = true;
+            } else {
+                Log::Write(L"Unknown --video-format value ignored: %s", value.c_str());
+            }
+        } else if (arg == L"--preview-sink" && i + 1 < argc) {
+            const std::wstring value = argv[++i];
+            if (value == L"default") {
+                options.previewSinkMode = PreviewSinkMode::Default;
+            } else if (value == L"add-stream") {
+                options.previewSinkMode = PreviewSinkMode::AutoAddStream;
+            } else if (value == L"rgb32") {
+                options.previewSinkMode = PreviewSinkMode::Rgb32AddStream;
+            } else {
+                Log::Write(L"Unknown --preview-sink value ignored: %s", value.c_str());
+            }
         } else {
             Log::Write(L"Unknown argument ignored: %s", arg.c_str());
         }
@@ -53,9 +73,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     }
 
     const AppOptions options = ParseCommandLine();
-    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s'",
+    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s', video-format='%s', preview-sink='%d'",
         options.uvcMatch.c_str(),
-        options.uacMatch.c_str());
+        options.uacMatch.c_str(),
+        options.preferH264 ? L"h264" : L"auto",
+        static_cast<int>(options.previewSinkMode));
 
     int exitCode = 0;
     {
