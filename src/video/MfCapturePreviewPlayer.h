@@ -21,11 +21,14 @@ private:
     class CaptureEngineCallback;
 
     HRESULT ConfigureH264IfAvailable();
+    HRESULT CreatePreviewMediaType(IMFMediaType** mediaType);
     void LogCurrentVideoTypes();
 
     HWND hwndVideo_ = nullptr;
     Microsoft::WRL::ComPtr<IMFCaptureEngine> captureEngine_;
     Microsoft::WRL::ComPtr<IMFCapturePreviewSink> previewSink_;
     Microsoft::WRL::ComPtr<IMFCaptureEngineOnEventCallback> callback_;
+    DWORD previewSourceStreamIndex_ = 0;
+    bool hasPreviewSourceStreamIndex_ = false;
     bool started_ = false;
 };

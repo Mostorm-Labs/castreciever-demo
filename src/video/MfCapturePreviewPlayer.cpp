@@ -296,10 +296,26 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const std::wstring& device
         return hr;
     }
 
+    if (!hasPreviewSourceStreamIndex_) {
+        Log::Write(L"No video source stream was selected for preview.");
+        Stop();
+        return MF_E_INVALIDSTREAMNUMBER;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaType> previewMediaType;
+    hr = CreatePreviewMediaType(&previewMediaType);
+    if (FAILED(hr)) {
+        LogHResult(L"MfCapturePreviewPlayer::CreatePreviewMediaType", hr);
+        Stop();
+        return hr;
+    }
+
+    LOG_IF_FAILED(previewSink_->RemoveAllStreams(), L"IMFCapturePreviewSink::RemoveAllStreams");
+
     DWORD previewSinkStreamIndex = 0;
     hr = previewSink_->AddStream(
-        static_cast<DWORD>(MF_CAPTURE_ENGINE_PREFERRED_SOURCE_STREAM_FOR_VIDEO_PREVIEW),
-        nullptr,
+        previewSourceStreamIndex_,
+        previewMediaType.Get(),
         nullptr,
         &previewSinkStreamIndex);
     if (FAILED(hr)) {
@@ -308,7 +324,7 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const std::wstring& device
         return hr;
     }
 
-    Log::Write(L"Preview sink stream index=%u", previewSinkStreamIndex);
+    Log::Write(L"Preview source stream=%u sink stream=%u", previewSourceStreamIndex_, previewSinkStreamIndex);
 
     hr = captureEngine_->StartPreview();
     if (FAILED(hr)) {
@@ -333,6 +349,8 @@ void MfCapturePreviewPlayer::Stop()
     captureEngine_.Reset();
     callback_.Reset();
     hwndVideo_ = nullptr;
+    previewSourceStreamIndex_ = 0;
+    hasPreviewSourceStreamIndex_ = false;
 }
 
 void MfCapturePreviewPlayer::Resize(UINT width, UINT height)
@@ -356,6 +374,9 @@ HRESULT MfCapturePreviewPlayer::ConfigureH264IfAvailable()
     DWORD streamCount = 0;
     RETURN_IF_FAILED_LOG(source->GetDeviceStreamCount(&streamCount), L"IMFCaptureSource::GetDeviceStreamCount");
 
+    bool sawVideoStream = false;
+    DWORD firstVideoStreamIndex = 0;
+
     for (DWORD streamIndex = 0; streamIndex < streamCount; ++streamIndex) {
         MF_CAPTURE_ENGINE_STREAM_CATEGORY category = MF_CAPTURE_ENGINE_STREAM_CATEGORY_UNSUPPORTED;
         HRESULT hr = source->GetDeviceStreamCategory(streamIndex, &category);
@@ -366,6 +387,11 @@ HRESULT MfCapturePreviewPlayer::ConfigureH264IfAvailable()
 
         if (!IsVideoStreamCategory(category)) {
             continue;
+        }
+
+        if (!sawVideoStream) {
+            sawVideoStream = true;
+            firstVideoStreamIndex = streamIndex;
         }
 
         for (DWORD typeIndex = 0;; ++typeIndex) {
@@ -399,6 +425,8 @@ HRESULT MfCapturePreviewPlayer::ConfigureH264IfAvailable()
                 (subtype == MFVideoFormat_H264 || subtype == MFVideoFormat_H264_ES)) {
                 hr = source->SetCurrentDeviceMediaType(streamIndex, mediaType.Get());
                 if (SUCCEEDED(hr)) {
+                    previewSourceStreamIndex_ = streamIndex;
+                    hasPreviewSourceStreamIndex_ = true;
                     Log::Write(L"Selected H.264 UVC media type on stream %u type %u.", streamIndex, typeIndex);
                     return S_OK;
                 }
@@ -408,8 +436,47 @@ HRESULT MfCapturePreviewPlayer::ConfigureH264IfAvailable()
         }
     }
 
+    if (sawVideoStream) {
+        previewSourceStreamIndex_ = firstVideoStreamIndex;
+        hasPreviewSourceStreamIndex_ = true;
+        Log::Write(L"No explicit H.264 UVC media type selected. Using first video source stream %u and allowing Capture Engine to auto-negotiate.", firstVideoStreamIndex);
+        return S_FALSE;
+    }
+
     Log::Write(L"No explicit H.264 UVC media type selected. Capture Engine will auto-negotiate preview.");
-    return S_FALSE;
+    return MF_E_INVALIDSTREAMNUMBER;
+}
+
+HRESULT MfCapturePreviewPlayer::CreatePreviewMediaType(IMFMediaType** mediaType)
+{
+    if (mediaType == nullptr) {
+        return E_POINTER;
+    }
+    *mediaType = nullptr;
+
+    if (!captureEngine_ || !hasPreviewSourceStreamIndex_) {
+        return E_UNEXPECTED;
+    }
+
+    Microsoft::WRL::ComPtr<IMFCaptureSource> source;
+    RETURN_IF_FAILED_LOG(captureEngine_->GetSource(&source), L"IMFCaptureEngine::GetSource(CreatePreviewMediaType)");
+
+    Microsoft::WRL::ComPtr<IMFMediaType> currentType;
+    RETURN_IF_FAILED_LOG(
+        source->GetCurrentDeviceMediaType(previewSourceStreamIndex_, &currentType),
+        L"IMFCaptureSource::GetCurrentDeviceMediaType(CreatePreviewMediaType)");
+
+    Microsoft::WRL::ComPtr<IMFMediaType> previewType;
+    RETURN_IF_FAILED_LOG(MFCreateMediaType(&previewType), L"MFCreateMediaType(preview)");
+
+    RETURN_IF_FAILED_LOG(currentType->CopyAllItems(previewType.Get()), L"IMFMediaType::CopyAllItems(preview)");
+    RETURN_IF_FAILED_LOG(previewType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video), L"IMFMediaType::SetGUID(MF_MT_MAJOR_TYPE preview)");
+    RETURN_IF_FAILED_LOG(previewType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32), L"IMFMediaType::SetGUID(MF_MT_SUBTYPE RGB32 preview)");
+    RETURN_IF_FAILED_LOG(previewType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE), L"IMFMediaType::SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT preview)");
+
+    Log::Write(L"Created preview sink media type RGB32 for source stream %u.", previewSourceStreamIndex_);
+    *mediaType = previewType.Detach();
+    return S_OK;
 }
 
 void MfCapturePreviewPlayer::LogCurrentVideoTypes()
