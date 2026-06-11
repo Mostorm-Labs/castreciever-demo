@@ -1,0 +1,89 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows x64 Release
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -S . -B build -A x64
+
+      - name: Build
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --build build --config Release --parallel
+
+      - name: Package
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $packageDir = "dist/UsbCastReceiver-windows-x64-Release"
+          $zipPath = "dist/UsbCastReceiver-windows-x64-Release.zip"
+
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+
+          $exe = $null
+          if (Test-Path "build" -PathType Container) {
+            $exe = Get-ChildItem -Path "build" -Recurse -Filter "UsbCastReceiver.exe" -File | Select-Object -First 1
+          }
+
+          if (-not $exe) {
+            Write-Host "UsbCastReceiver.exe was not found under build. Build directory contents:"
+            if (Test-Path "build") {
+              Get-ChildItem -Path "build" -Recurse | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
+            } else {
+              Write-Host "build directory does not exist."
+            }
+            throw "UsbCastReceiver.exe not found"
+          }
+
+          Copy-Item -LiteralPath $exe.FullName -Destination $packageDir -Force
+
+          $pdb = Get-ChildItem -Path "build" -Recurse -Filter "UsbCastReceiver.pdb" -File | Select-Object -First 1
+          if ($pdb) {
+            Copy-Item -LiteralPath $pdb.FullName -Destination $packageDir -Force
+          }
+
+          if (Test-Path "README.md" -PathType Leaf) {
+            Copy-Item -LiteralPath "README.md" -Destination $packageDir -Force
+          }
+
+          if (Test-Path "LICENSE" -PathType Leaf) {
+            Copy-Item -LiteralPath "LICENSE" -Destination $packageDir -Force
+          }
+
+          if (Test-Path "config" -PathType Container) {
+            Copy-Item -Path "config" -Destination $packageDir -Recurse -Force
+          }
+
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+
+          Compress-Archive -Path "$packageDir/*" -DestinationPath $zipPath -Force
+          Write-Host "Created $zipPath"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UsbCastReceiver-windows-x64-Release
+          path: dist/UsbCastReceiver-windows-x64-Release.zip
+          retention-days: 14
