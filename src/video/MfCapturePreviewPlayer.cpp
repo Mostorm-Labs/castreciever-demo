@@ -37,6 +37,42 @@ bool IsVideoStreamCategory(MF_CAPTURE_ENGINE_STREAM_CATEGORY category)
         category == MF_CAPTURE_ENGINE_STREAM_CATEGORY_VIDEO_CAPTURE;
 }
 
+HRESULT CreateCaptureEngine(Microsoft::WRL::ComPtr<IMFCaptureEngine>& captureEngine)
+{
+    Microsoft::WRL::ComPtr<IMFCaptureEngineClassFactory> factory;
+    HRESULT hr = CoCreateInstance(
+        CLSID_MFCaptureEngineClassFactory,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&factory));
+
+    if (SUCCEEDED(hr)) {
+        hr = factory->CreateInstance(CLSID_MFCaptureEngine, IID_PPV_ARGS(&captureEngine));
+        if (SUCCEEDED(hr)) {
+            Log::Write(L"Created Capture Engine through IMFCaptureEngineClassFactory.");
+            return S_OK;
+        }
+
+        LogHResult(L"IMFCaptureEngineClassFactory::CreateInstance(CLSID_MFCaptureEngine)", hr);
+    } else {
+        LogHResult(L"CoCreateInstance(CLSID_MFCaptureEngineClassFactory)", hr);
+    }
+
+    hr = CoCreateInstance(
+        CLSID_MFCaptureEngine,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&captureEngine));
+
+    if (SUCCEEDED(hr)) {
+        Log::Write(L"Created Capture Engine directly through CLSID_MFCaptureEngine.");
+        return S_OK;
+    }
+
+    LogHResult(L"CoCreateInstance(CLSID_MFCaptureEngine)", hr);
+    return hr;
+}
+
 void LogMediaType(DWORD streamIndex, DWORD typeIndex, IMFMediaType* mediaType)
 {
     GUID major = GUID_NULL;
@@ -216,9 +252,7 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const std::wstring& device
     auto* callback = new CaptureEngineCallback();
     callback_.Attach(callback);
 
-    RETURN_IF_FAILED_LOG(
-        CoCreateInstance(CLSID_MFCaptureEngine, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&captureEngine_)),
-        L"CoCreateInstance(CLSID_MFCaptureEngine)");
+    RETURN_IF_FAILED_LOG(CreateCaptureEngine(captureEngine_), L"CreateCaptureEngine");
 
     Microsoft::WRL::ComPtr<IMFAttributes> attributes;
     RETURN_IF_FAILED_LOG(MFCreateAttributes(&attributes, 1), L"MFCreateAttributes(Capture Engine)");

@@ -63,6 +63,17 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --uac-match "audio n
 - Some UVC H.264 devices may not preview directly through Capture Engine on every driver stack. In that case, complete and switch to the Source Reader + H.264 Decoder MFT + D3D11 fallback path.
 - The current preview path relies on Capture Engine for decode, scheduling, and presentation. It does not expose frame-level statistics yet.
 
+## Troubleshooting
+
+- `CoCreateInstance(CLSID_MFCaptureEngine) failed: 0x80004002 (No such interface supported)` means the app could not obtain `IMFCaptureEngine` before opening the UVC device. The code now first tries `IMFCaptureEngineClassFactory::CreateInstance`, then falls back to direct `CLSID_MFCaptureEngine` creation and logs both HRESULT values.
+- If Capture Engine creation still fails, verify the machine is a full Windows 10/11 desktop install with Media Foundation components available. Windows N/KN editions may require the Media Feature Pack.
+- If Capture Engine creation succeeds but `IMFCaptureEngine::Initialize` fails, investigate device selection, camera privacy settings, device occupation by another process, UVC driver behavior, and supported media types.
+- For deeper Media Foundation diagnostics, run:
+
+```bat
+mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your device"
+```
+
 ## Performance Principles
 
 - No Electron, Chromium, or WebView render chain.
