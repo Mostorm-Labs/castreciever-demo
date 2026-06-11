@@ -13,6 +13,35 @@ constexpr wchar_t kMainWindowClassName[] = L"UsbCastReceiverMainWindow";
 constexpr wchar_t kVideoWindowClassName[] = L"UsbCastReceiverVideoWindow";
 constexpr wchar_t kSelfTestPaintProperty[] = L"UsbCastReceiverSelfTestPaint";
 
+void PaintSelfTestPattern(HWND hwnd, HDC dc, const wchar_t* label)
+{
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    const COLORREF colors[] = {
+        RGB(255, 0, 0),
+        RGB(0, 180, 0),
+        RGB(0, 80, 255),
+        RGB(255, 220, 0),
+    };
+    const int width = client.right - client.left;
+    for (int i = 0; i < static_cast<int>(ARRAYSIZE(colors)); ++i) {
+        RECT band = client;
+        band.left = i * width / static_cast<int>(ARRAYSIZE(colors));
+        band.right = (i + 1) * width / static_cast<int>(ARRAYSIZE(colors));
+        HBRUSH brush = CreateSolidBrush(colors[i]);
+        if (brush != nullptr) {
+            FillRect(dc, &band, brush);
+            DeleteObject(brush);
+        }
+    }
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    RECT textRect = client;
+    textRect.left += 16;
+    textRect.top += 16;
+    DrawTextW(dc, label, -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+}
+
 LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message) {
@@ -23,31 +52,7 @@ LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(hwnd, &paint);
         if (GetPropW(hwnd, kSelfTestPaintProperty) != nullptr) {
-            RECT client = {};
-            GetClientRect(hwnd, &client);
-            const COLORREF colors[] = {
-                RGB(255, 0, 0),
-                RGB(0, 180, 0),
-                RGB(0, 80, 255),
-                RGB(255, 220, 0),
-            };
-            const int width = client.right - client.left;
-            for (int i = 0; i < static_cast<int>(ARRAYSIZE(colors)); ++i) {
-                RECT band = client;
-                band.left = i * width / static_cast<int>(ARRAYSIZE(colors));
-                band.right = (i + 1) * width / static_cast<int>(ARRAYSIZE(colors));
-                HBRUSH brush = CreateSolidBrush(colors[i]);
-                if (brush != nullptr) {
-                    FillRect(dc, &band, brush);
-                    DeleteObject(brush);
-                }
-            }
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, RGB(255, 255, 255));
-            RECT textRect = client;
-            textRect.left += 16;
-            textRect.top += 16;
-            DrawTextW(dc, L"UsbCastReceiver video child window", -1, &textRect, DT_LEFT | DT_TOP | DT_NOPREFIX);
+            PaintSelfTestPattern(hwnd, dc, L"UsbCastReceiver video child window");
         }
         EndPaint(hwnd, &paint);
         return 0;
@@ -293,6 +298,16 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_SIZE:
         OnSize(LOWORD(lParam), HIWORD(lParam));
         return 0;
+
+    case WM_PAINT: {
+        PAINTSTRUCT paint = {};
+        HDC dc = BeginPaint(hwnd, &paint);
+        if (GetPropW(hwnd, kSelfTestPaintProperty) != nullptr) {
+            PaintSelfTestPattern(hwnd, dc, L"UsbCastReceiver main window");
+        }
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
 
     case WM_COMMAND:
         if (HIWORD(wParam) == BN_CLICKED) {

@@ -8,7 +8,7 @@ namespace {
 
 constexpr wchar_t kSelfTestPaintProperty[] = L"UsbCastReceiverSelfTestPaint";
 
-void PaintSelfTest(HWND hwnd, int tick)
+void PaintSelfTest(HWND hwnd, int tick, const wchar_t* surfaceName)
 {
     if (hwnd == nullptr) {
         return;
@@ -49,7 +49,7 @@ void PaintSelfTest(HWND hwnd, int tick)
     SetTextColor(dc, RGB(255, 255, 255));
 
     wchar_t text[256] = {};
-    StringCchPrintfW(text, ARRAYSIZE(text), L"SELF TEST VIDEO WINDOW\nIf this is not visible, Win32 painting is not reaching the displayed surface.\nTick: %d", tick);
+    StringCchPrintfW(text, ARRAYSIZE(text), L"SELF TEST %s\nIf this is not visible, Win32 painting is not reaching the displayed surface.\nTick: %d", surfaceName, tick);
 
     RECT textRect = client;
     textRect.left += 24;
@@ -80,8 +80,34 @@ HRESULT SelfTestVideoPlayer::Start(HWND hwndVideo, const VideoStartOptions&)
     }
 
     hwndVideo_ = hwndVideo;
+    HWND parent = GetParent(hwndVideo_);
     SetPropW(hwndVideo_, kSelfTestPaintProperty, reinterpret_cast<HANDLE>(1));
-    Log::Write(L"Self-test video backend started.");
+    if (parent != nullptr) {
+        SetPropW(parent, kSelfTestPaintProperty, reinterpret_cast<HANDLE>(1));
+    }
+
+    RECT videoRect = {};
+    RECT parentRect = {};
+    GetClientRect(hwndVideo_, &videoRect);
+    if (parent != nullptr) {
+        GetClientRect(parent, &parentRect);
+    }
+
+    Log::Write(L"Self-test video backend started. videoHwnd=0x%p parentHwnd=0x%p videoClient=%ldx%ld parentClient=%ldx%ld",
+        hwndVideo_,
+        parent,
+        videoRect.right - videoRect.left,
+        videoRect.bottom - videoRect.top,
+        parentRect.right - parentRect.left,
+        parentRect.bottom - parentRect.top);
+
+    InvalidateRect(hwndVideo_, nullptr, TRUE);
+    UpdateWindow(hwndVideo_);
+    if (parent != nullptr) {
+        InvalidateRect(parent, nullptr, TRUE);
+        UpdateWindow(parent);
+    }
+
     worker_ = std::thread(&SelfTestVideoPlayer::WorkerThread, this);
     return S_OK;
 }
@@ -93,21 +119,28 @@ void SelfTestVideoPlayer::Stop()
         worker_.join();
     }
     if (hwndVideo_ != nullptr) {
+        HWND parent = GetParent(hwndVideo_);
         RemovePropW(hwndVideo_, kSelfTestPaintProperty);
+        if (parent != nullptr) {
+            RemovePropW(parent, kSelfTestPaintProperty);
+        }
     }
     hwndVideo_ = nullptr;
 }
 
 void SelfTestVideoPlayer::Resize(UINT, UINT)
 {
-    PaintSelfTest(hwndVideo_, 0);
+    PaintSelfTest(hwndVideo_, 0, L"VIDEO WINDOW");
+    PaintSelfTest(GetParent(hwndVideo_), 0, L"MAIN WINDOW");
 }
 
 void SelfTestVideoPlayer::WorkerThread()
 {
     int tick = 0;
     while (running_.load()) {
-        PaintSelfTest(hwndVideo_, tick++);
+        PaintSelfTest(hwndVideo_, tick, L"VIDEO WINDOW");
+        PaintSelfTest(GetParent(hwndVideo_), tick, L"MAIN WINDOW");
+        ++tick;
         Sleep(500);
     }
 }
