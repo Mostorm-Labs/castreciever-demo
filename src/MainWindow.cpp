@@ -10,6 +10,25 @@
 namespace {
 
 constexpr wchar_t kMainWindowClassName[] = L"UsbCastReceiverMainWindow";
+constexpr wchar_t kVideoWindowClassName[] = L"UsbCastReceiverVideoWindow";
+
+LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT: {
+        PAINTSTRUCT paint = {};
+        BeginPaint(hwnd, &paint);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+
+    default:
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+}
 
 } // namespace
 
@@ -32,7 +51,7 @@ HRESULT MainWindow::Create(HINSTANCE instance, int showCommand, IVideoPlayer* vi
         0,
         kMainWindowClassName,
         L"USB Cast Receiver",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         1280,
@@ -82,6 +101,23 @@ HRESULT MainWindow::RegisterWindowClass()
         }
     }
 
+    WNDCLASSEXW videoWc = {};
+    videoWc.cbSize = sizeof(videoWc);
+    videoWc.lpfnWndProc = VideoWindowProc;
+    videoWc.hInstance = instance_;
+    videoWc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    videoWc.hbrBackground = nullptr;
+    videoWc.lpszClassName = kVideoWindowClassName;
+
+    if (RegisterClassExW(&videoWc) == 0) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_CLASS_ALREADY_EXISTS) {
+            const HRESULT hr = HRESULT_FROM_WIN32(error);
+            LogHResult(L"RegisterClassExW(video)", hr);
+            return hr;
+        }
+    }
+
     return S_OK;
 }
 
@@ -89,9 +125,9 @@ HRESULT MainWindow::OnCreate()
 {
     videoHwnd_ = CreateWindowExW(
         0,
-        L"STATIC",
+        kVideoWindowClassName,
         nullptr,
-        WS_CHILD | WS_VISIBLE | SS_BLACKRECT,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0,
         0,
         0,

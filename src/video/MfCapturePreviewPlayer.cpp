@@ -302,26 +302,39 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const std::wstring& device
         return MF_E_INVALIDSTREAMNUMBER;
     }
 
-    Microsoft::WRL::ComPtr<IMFMediaType> previewMediaType;
-    hr = CreatePreviewMediaType(&previewMediaType);
-    if (FAILED(hr)) {
-        LogHResult(L"MfCapturePreviewPlayer::CreatePreviewMediaType", hr);
-        Stop();
-        return hr;
-    }
-
     LOG_IF_FAILED(previewSink_->RemoveAllStreams(), L"IMFCapturePreviewSink::RemoveAllStreams");
 
     DWORD previewSinkStreamIndex = 0;
     hr = previewSink_->AddStream(
         previewSourceStreamIndex_,
-        previewMediaType.Get(),
+        nullptr,
         nullptr,
         &previewSinkStreamIndex);
     if (FAILED(hr)) {
-        LogHResult(L"IMFCapturePreviewSink::AddStream(video preview)", hr);
-        Stop();
-        return hr;
+        LogHResult(L"IMFCapturePreviewSink::AddStream(auto video preview)", hr);
+
+        Microsoft::WRL::ComPtr<IMFMediaType> previewMediaType;
+        HRESULT fallbackHr = CreatePreviewMediaType(&previewMediaType);
+        if (FAILED(fallbackHr)) {
+            LogHResult(L"MfCapturePreviewPlayer::CreatePreviewMediaType", fallbackHr);
+            Stop();
+            return hr;
+        }
+
+        fallbackHr = previewSink_->AddStream(
+            previewSourceStreamIndex_,
+            previewMediaType.Get(),
+            nullptr,
+            &previewSinkStreamIndex);
+        if (FAILED(fallbackHr)) {
+            LogHResult(L"IMFCapturePreviewSink::AddStream(RGB32 video preview)", fallbackHr);
+            Stop();
+            return fallbackHr;
+        }
+
+        Log::Write(L"Preview sink accepted RGB32 fallback media type.");
+    } else {
+        Log::Write(L"Preview sink accepted auto-negotiated media type.");
     }
 
     Log::Write(L"Preview source stream=%u sink stream=%u", previewSourceStreamIndex_, previewSinkStreamIndex);
