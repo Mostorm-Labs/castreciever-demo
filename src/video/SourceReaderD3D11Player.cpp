@@ -76,6 +76,40 @@ void PostVideoStats(HWND hwndVideo, double fps, DWORD frameCount)
     PostMessageW(parent, WM_USB_CAST_VIDEO_STATS, static_cast<WPARAM>(fpsTenths), static_cast<LPARAM>(frameCount));
 }
 
+bool ShouldRenderFrameForTargetFps(
+    LONGLONG timestamp,
+    UINT32 targetVideoFps,
+    bool& hasNextRenderTimestamp,
+    LONGLONG& nextRenderTimestamp)
+{
+    if (targetVideoFps == 0) {
+        return true;
+    }
+
+    if (timestamp < 0) {
+        return true;
+    }
+
+    constexpr LONGLONG kMfOneSecond = 10000000;
+    const LONGLONG framePeriod = std::max<LONGLONG>(1, kMfOneSecond / targetVideoFps);
+
+    if (!hasNextRenderTimestamp) {
+        hasNextRenderTimestamp = true;
+        nextRenderTimestamp = timestamp + framePeriod;
+        return true;
+    }
+
+    if (timestamp < nextRenderTimestamp) {
+        return false;
+    }
+
+    do {
+        nextRenderTimestamp += framePeriod;
+    } while (nextRenderTimestamp <= timestamp);
+
+    return true;
+}
+
 void LogMediaType(const wchar_t* prefix, DWORD typeIndex, IMFMediaType* mediaType)
 {
     GUID subtype = GUID_NULL;
@@ -955,9 +989,13 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
         DWORD frameCount = 0;
         DWORD statsFrameCount = 0;
+        DWORD skippedFrameCount = 0;
+        DWORD statsSkippedFrameCount = 0;
         ULONGLONG statsStart = GetTickCount64();
         DWORD mediaTypeChangeCount = 0;
         ULONGLONG lastMediaTypeRefreshMs = 0;
+        bool hasNextRenderTimestamp = false;
+        LONGLONG nextRenderTimestamp = 0;
         PostVideoStats(hwndVideo_, 0.0, 0);
 
         while (running_.load()) {
@@ -1027,6 +1065,12 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                 continue;
             }
 
+            if (!ShouldRenderFrameForTargetFps(timestamp, options.targetVideoFps, hasNextRenderTimestamp, nextRenderTimestamp)) {
+                ++skippedFrameCount;
+                ++statsSkippedFrameCount;
+                continue;
+            }
+
             DWORD sampleByteCount = 0;
             hr = RenderNv12Sample(sample.Get(), frameWidth, frameHeight, renderFrameRateNumerator, renderFrameRateDenominator, sampleByteCount);
             if (FAILED(hr)) {
@@ -1046,12 +1090,15 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             } else if (elapsedMs >= 1000) {
                 const double fps = static_cast<double>(statsFrameCount) * 1000.0 / static_cast<double>(std::max<ULONGLONG>(1, elapsedMs));
                 PostVideoStats(hwndVideo_, fps, frameCount);
-                Log::Write(L"SourceReader render stats: frame=%u timestamp=%lld bytes=%u fps=%.1f",
+                Log::Write(L"SourceReader render stats: frame=%u skipped=%u timestamp=%lld bytes=%u fps=%.1f skippedInWindow=%u",
                     frameCount,
+                    skippedFrameCount,
                     timestamp,
                     sampleByteCount,
-                    fps);
+                    fps,
+                    statsSkippedFrameCount);
                 statsFrameCount = 0;
+                statsSkippedFrameCount = 0;
                 statsStart = now;
             }
         }
