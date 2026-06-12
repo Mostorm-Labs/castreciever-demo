@@ -39,6 +39,8 @@ target_compile_features(UsbCastReceiver PRIVATE cxx_std_17)
 target_compile_definitions(UsbCastReceiver PRIVATE
     UNICODE
     _UNICODE
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     USB_CAST_RECEIVER_GIT_SHA=L"${USB_CAST_RECEIVER_GIT_SHA}"

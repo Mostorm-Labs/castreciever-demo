@@ -76,6 +76,16 @@ void PostVideoStats(HWND hwndVideo, double fps, DWORD frameCount)
     PostMessageW(parent, WM_USB_CAST_VIDEO_STATS, static_cast<WPARAM>(fpsTenths), static_cast<LPARAM>(frameCount));
 }
 
+void PostVideoNativeSize(HWND hwndVideo, UINT32 width, UINT32 height)
+{
+    HWND parent = GetParent(hwndVideo);
+    if (parent == nullptr || width == 0 || height == 0) {
+        return;
+    }
+
+    PostMessageW(parent, WM_USB_CAST_VIDEO_NATIVE_SIZE, static_cast<WPARAM>(width), static_cast<LPARAM>(height));
+}
+
 bool ShouldRenderFrameForTargetFps(
     LONGLONG timestamp,
     UINT32 targetVideoFps,
@@ -653,13 +663,15 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(
         videoProcessorOutputWidth_ = swapChainWidth_;
         videoProcessorOutputHeight_ = swapChainHeight_;
 
-        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u fps=%u/%u output=%ux%u",
+        const bool oneToOneOutput = frameWidth == swapChainWidth_ && frameHeight == swapChainHeight_;
+        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u fps=%u/%u output=%ux%u scale=%s",
             frameWidth,
             frameHeight,
             frameRateNumerator,
             frameRateDenominator,
             swapChainWidth_,
-            swapChainHeight_);
+            swapChainHeight_,
+            oneToOneOutput ? L"1:1" : L"resample");
     }
 
     if (!videoOutputView_) {
@@ -981,6 +993,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
         width_.store(frameWidth);
         height_.store(frameHeight);
+        PostVideoNativeSize(hwndVideo_, frameWidth, frameHeight);
         Log::Write(L"SourceReader D3D11 NV12/DXVA zero-copy renderer started: %ux%u fps=%u/%u",
             frameWidth,
             frameHeight,
@@ -1055,6 +1068,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                     }
                     width_.store(frameWidth);
                     height_.store(frameHeight);
+                    PostVideoNativeSize(hwndVideo_, frameWidth, frameHeight);
                 } else if (mediaTypeChangeCount <= 3) {
                     Log::Write(L"SourceReader suppressed repeated media type change event count=%u.", mediaTypeChangeCount);
                 }

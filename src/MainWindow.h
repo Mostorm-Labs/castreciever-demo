@@ -26,6 +26,7 @@ private:
     HRESULT OnCreate();
     void OnSize(UINT width, UINT height);
     void OnVideoStats(UINT fpsTenths, UINT frameCount);
+    void OnVideoNativeSize(UINT width, UINT height);
     void OnCommand(int commandId);
     void StopMedia();
     void ToggleMute();
@@ -40,5 +41,8 @@ private:
     OverlayControls controls_;
     UINT statsFpsTenths_ = 0;
     UINT statsFrameCount_ = 0;
+    UINT nativeVideoWidth_ = 0;
+    UINT nativeVideoHeight_ = 0;
+    bool nativeSizeApplied_ = false;
     bool stopping_ = false;
 };

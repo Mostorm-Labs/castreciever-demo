@@ -24,6 +24,8 @@ constexpr int kResizeBorderWidth = 8;
 constexpr int kStatsOverlayWidth = 168;
 constexpr int kStatsOverlayHeight = 56;
 constexpr int kStatsOverlayMargin = 12;
+constexpr int kDefaultWindowWidth = 1280;
+constexpr int kDefaultWindowHeight = 720;
 
 POINT ScreenPointFromLParam(LPARAM lParam)
 {
@@ -73,6 +75,51 @@ LRESULT HitTestBorderlessWindow(HWND hwnd, POINT point)
     }
 
     return HTCAPTION;
+}
+
+void CenterWindowOnMonitor(HWND hwnd, UINT targetWidth, UINT targetHeight)
+{
+    if (hwnd == nullptr || targetWidth == 0 || targetHeight == 0) {
+        return;
+    }
+
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo = {};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        return;
+    }
+
+    const int monitorWidth = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+    const int monitorHeight = monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+    UINT finalWidth = targetWidth;
+    UINT finalHeight = targetHeight;
+
+    if (static_cast<int>(finalWidth) > monitorWidth || static_cast<int>(finalHeight) > monitorHeight) {
+        const double scaleX = static_cast<double>(monitorWidth) / static_cast<double>(targetWidth);
+        const double scaleY = static_cast<double>(monitorHeight) / static_cast<double>(targetHeight);
+        const double scale = std::min(scaleX, scaleY);
+        finalWidth = std::max<UINT>(1, static_cast<UINT>(static_cast<double>(targetWidth) * scale));
+        finalHeight = std::max<UINT>(1, static_cast<UINT>(static_cast<double>(targetHeight) * scale));
+        Log::Write(L"Native video size %ux%u is larger than monitor %dx%d; fitting window to %ux%u.",
+            targetWidth,
+            targetHeight,
+            monitorWidth,
+            monitorHeight,
+            finalWidth,
+            finalHeight);
+    }
+
+    const int x = monitorInfo.rcMonitor.left + (monitorWidth - static_cast<int>(finalWidth)) / 2;
+    const int y = monitorInfo.rcMonitor.top + (monitorHeight - static_cast<int>(finalHeight)) / 2;
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        x,
+        y,
+        static_cast<int>(finalWidth),
+        static_cast<int>(finalHeight),
+        SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void PaintSelfTestPattern(HWND hwnd, HDC dc, const wchar_t* label)
@@ -276,8 +323,8 @@ HRESULT MainWindow::Create(HINSTANCE instance, int showCommand, IVideoPlayer* vi
         WS_POPUP | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        1280,
-        720,
+        kDefaultWindowWidth,
+        kDefaultWindowHeight,
         nullptr,
         nullptr,
         instance_,
@@ -450,6 +497,39 @@ void MainWindow::OnVideoStats(UINT fpsTenths, UINT frameCount)
     }
 }
 
+void MainWindow::OnVideoNativeSize(UINT width, UINT height)
+{
+    if (width == 0 || height == 0) {
+        return;
+    }
+
+    const bool nativeSizeChanged = width != nativeVideoWidth_ || height != nativeVideoHeight_;
+    nativeVideoWidth_ = width;
+    nativeVideoHeight_ = height;
+    if (nativeSizeChanged) {
+        nativeSizeApplied_ = false;
+    }
+
+    if (hwnd_ == nullptr || nativeSizeApplied_ || IsZoomed(hwnd_)) {
+        return;
+    }
+
+    RECT client = {};
+    if (GetClientRect(hwnd_, &client)) {
+        const UINT clientWidth = static_cast<UINT>(std::max<LONG>(0, client.right - client.left));
+        const UINT clientHeight = static_cast<UINT>(std::max<LONG>(0, client.bottom - client.top));
+        if (clientWidth == width && clientHeight == height) {
+            nativeSizeApplied_ = true;
+            Log::Write(L"Main window already matches native video size: %ux%u.", width, height);
+            return;
+        }
+    }
+
+    nativeSizeApplied_ = true;
+    Log::Write(L"Adjusting main window client to native video size: %ux%u.", width, height);
+    CenterWindowOnMonitor(hwnd_, width, height);
+}
+
 void MainWindow::OnCommand(int commandId)
 {
     switch (commandId) {
@@ -566,6 +646,10 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 
     case WM_USB_CAST_VIDEO_STATS:
         OnVideoStats(static_cast<UINT>(wParam), static_cast<UINT>(lParam));
+        return 0;
+
+    case WM_USB_CAST_VIDEO_NATIVE_SIZE:
+        OnVideoNativeSize(static_cast<UINT>(wParam), static_cast<UINT>(lParam));
         return 0;
 
     case WM_GETMINMAXINFO:

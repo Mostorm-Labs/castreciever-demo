@@ -31,6 +31,34 @@ UINT32 ParseVideoFpsValue(const std::wstring& value)
     return static_cast<UINT32>(parsed);
 }
 
+void EnableDpiAwareness()
+{
+    if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+        Log::Write(L"DPI awareness enabled: Per-Monitor V2.");
+        return;
+    }
+
+    DWORD error = GetLastError();
+    if (error == ERROR_ACCESS_DENIED) {
+        Log::Write(L"DPI awareness was already set before startup.");
+        return;
+    }
+
+    LogHResult(L"SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)", HRESULT_FROM_WIN32(error));
+    if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {
+        Log::Write(L"DPI awareness enabled: Per-Monitor.");
+        return;
+    }
+
+    error = GetLastError();
+    if (error == ERROR_ACCESS_DENIED) {
+        Log::Write(L"DPI awareness was already set before fallback.");
+        return;
+    }
+
+    LogHResult(L"SetProcessDpiAwarenessContext(PER_MONITOR_AWARE)", HRESULT_FROM_WIN32(error));
+}
+
 AppOptions ParseCommandLine()
 {
     AppOptions options;
@@ -97,6 +125,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     Log::Initialize();
     SetUnhandledExceptionFilter(Log::UnhandledExceptionFilter);
     std::set_terminate(Log::TerminateHandler);
+    EnableDpiAwareness();
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
