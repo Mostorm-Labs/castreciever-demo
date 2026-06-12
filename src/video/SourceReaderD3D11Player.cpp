@@ -9,10 +9,9 @@
 #include <mferror.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <avrt.h>
 
 #include <algorithm>
-#include <cstring>
-#include <vector>
 
 namespace {
 
@@ -170,28 +169,9 @@ HRESULT ConfigureRgb32Output(IMFSourceReader* reader, UINT32& width, UINT32& hei
     return S_OK;
 }
 
-HRESULT CopySampleToVector(IMFSample* sample, std::vector<BYTE>& bytes)
+void PaintRgb32Frame(HWND hwnd, const BYTE* bytes, DWORD byteCount, UINT32 width, UINT32 height)
 {
-    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-    RETURN_IF_FAILED_LOG(sample->ConvertToContiguousBuffer(&buffer), L"IMFSample::ConvertToContiguousBuffer(video)");
-
-    BYTE* data = nullptr;
-    DWORD maxLength = 0;
-    DWORD currentLength = 0;
-    RETURN_IF_FAILED_LOG(buffer->Lock(&data, &maxLength, &currentLength), L"IMFMediaBuffer::Lock(video)");
-
-    bytes.resize(currentLength);
-    if (currentLength != 0) {
-        std::memcpy(bytes.data(), data, currentLength);
-    }
-
-    RETURN_IF_FAILED_LOG(buffer->Unlock(), L"IMFMediaBuffer::Unlock(video)");
-    return S_OK;
-}
-
-void PaintRgb32Frame(HWND hwnd, const std::vector<BYTE>& bytes, UINT32 width, UINT32 height)
-{
-    if (hwnd == nullptr || bytes.empty() || width == 0 || height == 0) {
+    if (hwnd == nullptr || bytes == nullptr || byteCount == 0 || width == 0 || height == 0) {
         return;
     }
 
@@ -204,6 +184,8 @@ void PaintRgb32Frame(HWND hwnd, const std::vector<BYTE>& bytes, UINT32 width, UI
     if (dc == nullptr) {
         return;
     }
+
+    SetStretchBltMode(dc, COLORONCOLOR);
 
     BITMAPINFO bitmapInfo = {};
     bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -223,12 +205,41 @@ void PaintRgb32Frame(HWND hwnd, const std::vector<BYTE>& bytes, UINT32 width, UI
         0,
         static_cast<int>(width),
         static_cast<int>(height),
-        bytes.data(),
+        bytes,
         &bitmapInfo,
         DIB_RGB_COLORS,
         SRCCOPY);
 
     ReleaseDC(hwnd, dc);
+}
+
+HRESULT PaintRgb32Sample(HWND hwnd, IMFSample* sample, UINT32 width, UINT32 height, DWORD& byteCount)
+{
+    byteCount = 0;
+    if (sample == nullptr) {
+        return E_INVALIDARG;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    RETURN_IF_FAILED_LOG(sample->ConvertToContiguousBuffer(&buffer), L"IMFSample::ConvertToContiguousBuffer(video)");
+
+    BYTE* data = nullptr;
+    DWORD maxLength = 0;
+    DWORD currentLength = 0;
+    RETURN_IF_FAILED_LOG(buffer->Lock(&data, &maxLength, &currentLength), L"IMFMediaBuffer::Lock(video)");
+
+    byteCount = currentLength;
+    if (currentLength != 0) {
+        PaintRgb32Frame(hwnd, data, currentLength, width, height);
+    }
+
+    HRESULT hr = buffer->Unlock();
+    if (FAILED(hr)) {
+        LogHResult(L"IMFMediaBuffer::Unlock(video)", hr);
+        return hr;
+    }
+
+    return S_OK;
 }
 
 void PaintDiagnosticPattern(HWND hwnd, const wchar_t* message)
@@ -371,6 +382,15 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         return;
     }
 
+    DWORD mmcssTaskIndex = 0;
+    HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Playback", &mmcssTaskIndex);
+    if (mmcssHandle == nullptr) {
+        LogHResult(L"AvSetMmThreadCharacteristicsW(SourceReader Playback)", HResultFromLastError());
+    }
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)) {
+        LogHResult(L"SetThreadPriority(SourceReader)", HResultFromLastError());
+    }
+
     PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader opening UVC device...");
 
     Microsoft::WRL::ComPtr<IMFMediaSource> mediaSource;
@@ -436,7 +456,8 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         Log::Write(L"SourceReader RGB32 diagnostic renderer started: %ux%u", frameWidth, frameHeight);
 
         DWORD frameCount = 0;
-        std::vector<BYTE> frameBytes;
+        DWORD statsFrameCount = 0;
+        ULONGLONG statsStart = GetTickCount64();
 
         while (running_.load()) {
             DWORD streamIndex = 0;
@@ -476,17 +497,26 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                 continue;
             }
 
-            hr = CopySampleToVector(sample.Get(), frameBytes);
+            DWORD sampleByteCount = 0;
+            hr = PaintRgb32Sample(hwndVideo_, sample.Get(), frameWidth, frameHeight, sampleByteCount);
             if (FAILED(hr)) {
-                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: copying decoded RGB32 frame");
+                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: painting decoded RGB32 frame");
                 break;
             }
 
-            PaintRgb32Frame(hwndVideo_, frameBytes, frameWidth, frameHeight);
-
             ++frameCount;
-            if (frameCount == 1 || frameCount % 120 == 0) {
-                Log::Write(L"SourceReader painted frame %u timestamp=%lld bytes=%zu", frameCount, timestamp, frameBytes.size());
+            ++statsFrameCount;
+            if (frameCount == 1 || statsFrameCount >= 120) {
+                const ULONGLONG now = GetTickCount64();
+                const ULONGLONG elapsedMs = std::max<ULONGLONG>(1, now - statsStart);
+                const double fps = static_cast<double>(statsFrameCount) * 1000.0 / static_cast<double>(elapsedMs);
+                Log::Write(L"SourceReader painted frame %u timestamp=%lld bytes=%u fps=%.1f",
+                    frameCount,
+                    timestamp,
+                    sampleByteCount,
+                    fps);
+                statsFrameCount = 0;
+                statsStart = now;
             }
         }
     } while (false);
@@ -496,6 +526,9 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
     }
 
     running_.store(false);
+    if (mmcssHandle != nullptr) {
+        AvRevertMmThreadCharacteristics(mmcssHandle);
+    }
     CoUninitialize();
 }
 
