@@ -55,6 +55,7 @@ target_link_libraries(UsbCastReceiver PRIVATE
     mfuuid
     wmcodecdspuuid
     d3d11
+    d3dcompiler
     dxgi
     user32
     gdi32

@@ -10,8 +10,10 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <avrt.h>
+#include <d3dcompiler.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace {
 
@@ -169,73 +171,68 @@ HRESULT ConfigureRgb32Output(IMFSourceReader* reader, UINT32& width, UINT32& hei
     return S_OK;
 }
 
-void PaintRgb32Frame(HWND hwnd, const BYTE* bytes, DWORD byteCount, UINT32 width, UINT32 height)
+constexpr char kFullscreenTriangleShader[] = R"(
+Texture2D frameTexture : register(t0);
+SamplerState linearSampler : register(s0);
+
+struct VertexOutput
 {
-    if (hwnd == nullptr || bytes == nullptr || byteCount == 0 || width == 0 || height == 0) {
-        return;
-    }
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
 
-    RECT client = {};
-    if (!GetClientRect(hwnd, &client)) {
-        return;
-    }
+VertexOutput VSMain(uint vertexId : SV_VertexID)
+{
+    float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2(-1.0,  3.0),
+        float2( 3.0, -1.0)
+    };
 
-    HDC dc = GetDC(hwnd);
-    if (dc == nullptr) {
-        return;
-    }
+    float2 uvs[3] = {
+        float2(0.0,  1.0),
+        float2(0.0, -1.0),
+        float2(2.0,  1.0)
+    };
 
-    SetStretchBltMode(dc, COLORONCOLOR);
-
-    BITMAPINFO bitmapInfo = {};
-    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmapInfo.bmiHeader.biWidth = static_cast<LONG>(width);
-    bitmapInfo.bmiHeader.biHeight = -static_cast<LONG>(height);
-    bitmapInfo.bmiHeader.biPlanes = 1;
-    bitmapInfo.bmiHeader.biBitCount = 32;
-    bitmapInfo.bmiHeader.biCompression = BI_RGB;
-
-    StretchDIBits(
-        dc,
-        0,
-        0,
-        client.right - client.left,
-        client.bottom - client.top,
-        0,
-        0,
-        static_cast<int>(width),
-        static_cast<int>(height),
-        bytes,
-        &bitmapInfo,
-        DIB_RGB_COLORS,
-        SRCCOPY);
-
-    ReleaseDC(hwnd, dc);
+    VertexOutput output;
+    output.position = float4(positions[vertexId], 0.0, 1.0);
+    output.uv = uvs[vertexId];
+    return output;
 }
 
-HRESULT PaintRgb32Sample(HWND hwnd, IMFSample* sample, UINT32 width, UINT32 height, DWORD& byteCount)
+float4 PSMain(VertexOutput input) : SV_TARGET
 {
-    byteCount = 0;
-    if (sample == nullptr) {
-        return E_INVALIDARG;
-    }
+    return frameTexture.Sample(linearSampler, input.uv);
+}
+)";
 
-    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-    RETURN_IF_FAILED_LOG(sample->ConvertToContiguousBuffer(&buffer), L"IMFSample::ConvertToContiguousBuffer(video)");
+HRESULT CompileShader(const char* entryPoint, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& blob)
+{
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+#if defined(_DEBUG)
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
 
-    BYTE* data = nullptr;
-    DWORD maxLength = 0;
-    DWORD currentLength = 0;
-    RETURN_IF_FAILED_LOG(buffer->Lock(&data, &maxLength, &currentLength), L"IMFMediaBuffer::Lock(video)");
-
-    byteCount = currentLength;
-    if (currentLength != 0) {
-        PaintRgb32Frame(hwnd, data, currentLength, width, height);
-    }
-
-    HRESULT hr = buffer->Unlock();
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    HRESULT hr = D3DCompile(
+        kFullscreenTriangleShader,
+        std::strlen(kFullscreenTriangleShader),
+        nullptr,
+        nullptr,
+        nullptr,
+        entryPoint,
+        target,
+        flags,
+        0,
+        &blob,
+        &errors);
     if (FAILED(hr)) {
-        LogHResult(L"IMFMediaBuffer::Unlock(video)", hr);
+        if (errors) {
+            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
+            OutputDebugStringA("\r\n");
+        }
+        LogHResult(L"D3DCompile(SourceReader renderer shader)", hr);
         return hr;
     }
 
@@ -361,8 +358,7 @@ void SourceReaderD3D11Player::Stop()
         worker_.join();
     }
 
-    d3dContext_.Reset();
-    d3dDevice_.Reset();
+    ResetRenderResources();
     hwndVideo_ = nullptr;
 }
 
@@ -370,6 +366,304 @@ void SourceReaderD3D11Player::Resize(UINT width, UINT height)
 {
     width_.store(width);
     height_.store(height);
+}
+
+HRESULT SourceReaderD3D11Player::EnsureRenderResources(UINT32 frameWidth, UINT32 frameHeight)
+{
+    RETURN_IF_FAILED_LOG(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
+    RETURN_IF_FAILED_LOG(EnsureShaders(), L"SourceReaderD3D11Player::EnsureShaders");
+    RETURN_IF_FAILED_LOG(EnsureFrameTexture(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureFrameTexture");
+
+    RECT client = {};
+    if (!GetClientRect(hwndVideo_, &client)) {
+        const HRESULT hr = HResultFromLastError();
+        LogHResult(L"GetClientRect(video hwnd D3D11)", hr);
+        return hr;
+    }
+
+    const UINT clientWidth = static_cast<UINT>(std::max<LONG>(0, client.right - client.left));
+    const UINT clientHeight = static_cast<UINT>(std::max<LONG>(0, client.bottom - client.top));
+    RETURN_IF_FAILED_LOG(EnsureSwapChain(clientWidth, clientHeight), L"SourceReaderD3D11Player::EnsureSwapChain");
+    return S_OK;
+}
+
+HRESULT SourceReaderD3D11Player::EnsureShaders()
+{
+    if (vertexShader_ && pixelShader_ && sampler_) {
+        return S_OK;
+    }
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vertexShaderBlob;
+    RETURN_IF_FAILED_LOG(CompileShader("VSMain", "vs_4_0", vertexShaderBlob), L"CompileShader(VSMain)");
+    RETURN_IF_FAILED_LOG(
+        d3dDevice_->CreateVertexShader(
+            vertexShaderBlob->GetBufferPointer(),
+            vertexShaderBlob->GetBufferSize(),
+            nullptr,
+            &vertexShader_),
+        L"ID3D11Device::CreateVertexShader(SourceReader)");
+
+    Microsoft::WRL::ComPtr<ID3DBlob> pixelShaderBlob;
+    RETURN_IF_FAILED_LOG(CompileShader("PSMain", "ps_4_0", pixelShaderBlob), L"CompileShader(PSMain)");
+    RETURN_IF_FAILED_LOG(
+        d3dDevice_->CreatePixelShader(
+            pixelShaderBlob->GetBufferPointer(),
+            pixelShaderBlob->GetBufferSize(),
+            nullptr,
+            &pixelShader_),
+        L"ID3D11Device::CreatePixelShader(SourceReader)");
+
+    D3D11_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+    RETURN_IF_FAILED_LOG(
+        d3dDevice_->CreateSamplerState(&samplerDesc, &sampler_),
+        L"ID3D11Device::CreateSamplerState(SourceReader)");
+
+    return S_OK;
+}
+
+HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHeight)
+{
+    if (clientWidth == 0 || clientHeight == 0) {
+        return S_OK;
+    }
+
+    if (!swapChain_) {
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+        RETURN_IF_FAILED_LOG(d3dDevice_.As(&dxgiDevice), L"ID3D11Device::QueryInterface(IDXGIDevice)");
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+        RETURN_IF_FAILED_LOG(dxgiDevice->GetAdapter(&adapter), L"IDXGIDevice::GetAdapter");
+
+        Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
+        RETURN_IF_FAILED_LOG(adapter->GetParent(IID_PPV_ARGS(&factory)), L"IDXGIAdapter::GetParent(IDXGIFactory2)");
+
+        DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+        swapChainDesc.Width = clientWidth;
+        swapChainDesc.Height = clientHeight;
+        swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        swapChainDesc.SampleDesc.Count = 1;
+        swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        swapChainDesc.BufferCount = 2;
+        swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+        swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+
+        HRESULT hr = factory->CreateSwapChainForHwnd(
+            d3dDevice_.Get(),
+            hwndVideo_,
+            &swapChainDesc,
+            nullptr,
+            nullptr,
+            &swapChain_);
+        if (FAILED(hr)) {
+            LogHResult(L"IDXGIFactory2::CreateSwapChainForHwnd(SourceReader)", hr);
+            return hr;
+        }
+
+        LOG_IF_FAILED(factory->MakeWindowAssociation(hwndVideo_, DXGI_MWA_NO_ALT_ENTER), L"IDXGIFactory2::MakeWindowAssociation");
+        swapChainWidth_ = clientWidth;
+        swapChainHeight_ = clientHeight;
+        Log::Write(L"SourceReader D3D11 swap chain created: %ux%u", clientWidth, clientHeight);
+    } else if (clientWidth != swapChainWidth_ || clientHeight != swapChainHeight_) {
+        ID3D11RenderTargetView* nullRenderTarget = nullptr;
+        d3dContext_->OMSetRenderTargets(1, &nullRenderTarget, nullptr);
+        renderTargetView_.Reset();
+
+        HRESULT hr = swapChain_->ResizeBuffers(0, clientWidth, clientHeight, DXGI_FORMAT_UNKNOWN, 0);
+        if (FAILED(hr)) {
+            LogHResult(L"IDXGISwapChain::ResizeBuffers(SourceReader)", hr);
+            return hr;
+        }
+
+        swapChainWidth_ = clientWidth;
+        swapChainHeight_ = clientHeight;
+        Log::Write(L"SourceReader D3D11 swap chain resized: %ux%u", clientWidth, clientHeight);
+    }
+
+    if (!renderTargetView_) {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
+        RETURN_IF_FAILED_LOG(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)), L"IDXGISwapChain::GetBuffer(SourceReader)");
+        RETURN_IF_FAILED_LOG(
+            d3dDevice_->CreateRenderTargetView(backBuffer.Get(), nullptr, &renderTargetView_),
+            L"ID3D11Device::CreateRenderTargetView(SourceReader)");
+    }
+
+    return S_OK;
+}
+
+HRESULT SourceReaderD3D11Player::EnsureFrameTexture(UINT32 frameWidth, UINT32 frameHeight)
+{
+    if (frameWidth == 0 || frameHeight == 0) {
+        return E_INVALIDARG;
+    }
+
+    if (frameTexture_ && frameTextureView_ && textureWidth_ == frameWidth && textureHeight_ == frameHeight) {
+        return S_OK;
+    }
+
+    frameTextureView_.Reset();
+    frameTexture_.Reset();
+
+    D3D11_TEXTURE2D_DESC textureDesc = {};
+    textureDesc.Width = frameWidth;
+    textureDesc.Height = frameHeight;
+    textureDesc.MipLevels = 1;
+    textureDesc.ArraySize = 1;
+    textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Usage = D3D11_USAGE_DYNAMIC;
+    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    RETURN_IF_FAILED_LOG(
+        d3dDevice_->CreateTexture2D(&textureDesc, nullptr, &frameTexture_),
+        L"ID3D11Device::CreateTexture2D(SourceReader frame)");
+    RETURN_IF_FAILED_LOG(
+        d3dDevice_->CreateShaderResourceView(frameTexture_.Get(), nullptr, &frameTextureView_),
+        L"ID3D11Device::CreateShaderResourceView(SourceReader frame)");
+
+    textureWidth_ = frameWidth;
+    textureHeight_ = frameHeight;
+    Log::Write(L"SourceReader D3D11 RGB32 upload texture created: %ux%u", frameWidth, frameHeight);
+    return S_OK;
+}
+
+HRESULT SourceReaderD3D11Player::RenderRgb32Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount)
+{
+    byteCount = 0;
+    RETURN_IF_FAILED_LOG(EnsureRenderResources(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureRenderResources");
+
+    if (!swapChain_ || !renderTargetView_) {
+        return S_OK;
+    }
+
+    RETURN_IF_FAILED_LOG(UploadRgb32Sample(sample, frameWidth, frameHeight, byteCount), L"SourceReaderD3D11Player::UploadRgb32Sample");
+    RETURN_IF_FAILED_LOG(DrawFrame(), L"SourceReaderD3D11Player::DrawFrame");
+    return S_OK;
+}
+
+HRESULT SourceReaderD3D11Player::UploadRgb32Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount)
+{
+    byteCount = 0;
+    if (sample == nullptr || !frameTexture_) {
+        return E_INVALIDARG;
+    }
+
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    RETURN_IF_FAILED_LOG(sample->ConvertToContiguousBuffer(&buffer), L"IMFSample::ConvertToContiguousBuffer(video)");
+
+    BYTE* data = nullptr;
+    DWORD maxLength = 0;
+    DWORD currentLength = 0;
+    HRESULT hr = buffer->Lock(&data, &maxLength, &currentLength);
+    if (FAILED(hr)) {
+        LogHResult(L"IMFMediaBuffer::Lock(video)", hr);
+        return hr;
+    }
+
+    const UINT sourcePitch = frameWidth * 4;
+    const unsigned long long requiredBytes = static_cast<unsigned long long>(sourcePitch) * frameHeight;
+    if (currentLength < requiredBytes) {
+        LOG_IF_FAILED(buffer->Unlock(), L"IMFMediaBuffer::Unlock(video after short RGB32 buffer)");
+        Log::Write(L"SourceReader RGB32 sample too small: bytes=%u required=%llu", currentLength, requiredBytes);
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    hr = d3dContext_->Map(frameTexture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    if (FAILED(hr)) {
+        LOG_IF_FAILED(buffer->Unlock(), L"IMFMediaBuffer::Unlock(video after D3D map failure)");
+        LogHResult(L"ID3D11DeviceContext::Map(SourceReader frame texture)", hr);
+        return hr;
+    }
+
+    auto* destination = static_cast<BYTE*>(mapped.pData);
+    for (UINT32 y = 0; y < frameHeight; ++y) {
+        std::memcpy(
+            destination + static_cast<size_t>(mapped.RowPitch) * y,
+            data + static_cast<size_t>(sourcePitch) * y,
+            sourcePitch);
+    }
+    d3dContext_->Unmap(frameTexture_.Get(), 0);
+
+    hr = buffer->Unlock();
+    if (FAILED(hr)) {
+        LogHResult(L"IMFMediaBuffer::Unlock(video)", hr);
+        return hr;
+    }
+
+    byteCount = currentLength;
+    return S_OK;
+}
+
+HRESULT SourceReaderD3D11Player::DrawFrame()
+{
+    if (!swapChain_ || !renderTargetView_ || !frameTextureView_ || !vertexShader_ || !pixelShader_ || !sampler_) {
+        return S_OK;
+    }
+
+    const FLOAT clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    d3dContext_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
+    d3dContext_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
+
+    D3D11_VIEWPORT viewport = {};
+    viewport.TopLeftX = 0.0f;
+    viewport.TopLeftY = 0.0f;
+    viewport.Width = static_cast<FLOAT>(swapChainWidth_);
+    viewport.Height = static_cast<FLOAT>(swapChainHeight_);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    d3dContext_->RSSetViewports(1, &viewport);
+
+    d3dContext_->IASetInputLayout(nullptr);
+    d3dContext_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    d3dContext_->VSSetShader(vertexShader_.Get(), nullptr, 0);
+    d3dContext_->PSSetShader(pixelShader_.Get(), nullptr, 0);
+    d3dContext_->PSSetShaderResources(0, 1, frameTextureView_.GetAddressOf());
+    d3dContext_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
+    d3dContext_->Draw(3, 0);
+
+    ID3D11ShaderResourceView* nullShaderResource = nullptr;
+    d3dContext_->PSSetShaderResources(0, 1, &nullShaderResource);
+
+    HRESULT hr = swapChain_->Present(1, 0);
+    if (FAILED(hr)) {
+        LogHResult(L"IDXGISwapChain::Present(SourceReader)", hr);
+        return hr;
+    }
+
+    return S_OK;
+}
+
+void SourceReaderD3D11Player::ResetRenderResources()
+{
+    if (d3dContext_) {
+        ID3D11ShaderResourceView* nullShaderResource = nullptr;
+        ID3D11RenderTargetView* nullRenderTarget = nullptr;
+        d3dContext_->PSSetShaderResources(0, 1, &nullShaderResource);
+        d3dContext_->OMSetRenderTargets(1, &nullRenderTarget, nullptr);
+        d3dContext_->ClearState();
+        d3dContext_->Flush();
+    }
+
+    sampler_.Reset();
+    pixelShader_.Reset();
+    vertexShader_.Reset();
+    frameTextureView_.Reset();
+    frameTexture_.Reset();
+    renderTargetView_.Reset();
+    swapChain_.Reset();
+    d3dContext_.Reset();
+    d3dDevice_.Reset();
+    swapChainWidth_ = 0;
+    swapChainHeight_ = 0;
+    textureWidth_ = 0;
+    textureHeight_ = 0;
 }
 
 void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
@@ -453,7 +747,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
         width_.store(frameWidth);
         height_.store(frameHeight);
-        Log::Write(L"SourceReader RGB32 diagnostic renderer started: %ux%u", frameWidth, frameHeight);
+        Log::Write(L"SourceReader D3D11 RGB32 swap-chain renderer started: %ux%u", frameWidth, frameHeight);
 
         DWORD frameCount = 0;
         DWORD statsFrameCount = 0;
@@ -498,9 +792,9 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             }
 
             DWORD sampleByteCount = 0;
-            hr = PaintRgb32Sample(hwndVideo_, sample.Get(), frameWidth, frameHeight, sampleByteCount);
+            hr = RenderRgb32Sample(sample.Get(), frameWidth, frameHeight, sampleByteCount);
             if (FAILED(hr)) {
-                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: painting decoded RGB32 frame");
+                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: rendering decoded RGB32 frame");
                 break;
             }
 
@@ -585,6 +879,6 @@ HRESULT SourceReaderD3D11Player::InitializeD3D11()
         return hr;
     }
 
-    Log::Write(L"D3D11 device created for future renderer path. Feature level=0x%04X", static_cast<unsigned int>(createdLevel));
+    Log::Write(L"D3D11 device created for SourceReader renderer. Feature level=0x%04X", static_cast<unsigned int>(createdLevel));
     return S_OK;
 }
