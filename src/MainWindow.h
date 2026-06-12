@@ -25,6 +25,7 @@ private:
     HRESULT RegisterWindowClass();
     HRESULT OnCreate();
     void OnSize(UINT width, UINT height);
+    void OnVideoStats(UINT fpsTenths, UINT frameCount);
     void OnCommand(int commandId);
     void StopMedia();
     void ToggleMute();
@@ -33,8 +34,11 @@ private:
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     HWND videoHwnd_ = nullptr;
+    HWND statsHwnd_ = nullptr;
     IVideoPlayer* videoPlayer_ = nullptr;
     IAudioPlayer* audioPlayer_ = nullptr;
     OverlayControls controls_;
+    UINT statsFpsTenths_ = 0;
+    UINT statsFrameCount_ = 0;
     bool stopping_ = false;
 };

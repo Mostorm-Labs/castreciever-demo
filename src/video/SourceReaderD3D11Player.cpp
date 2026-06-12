@@ -1,5 +1,6 @@
 #include "video/SourceReaderD3D11Player.h"
 
+#include "AppMessages.h"
 #include "HResult.h"
 #include "Log.h"
 #include "StringUtil.h"
@@ -13,6 +14,7 @@
 #include <d3d10.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -61,6 +63,17 @@ void NormalizeFrameRate(UINT32& numerator, UINT32& denominator)
         numerator = 30;
         denominator = 1;
     }
+}
+
+void PostVideoStats(HWND hwndVideo, double fps, DWORD frameCount)
+{
+    HWND parent = GetParent(hwndVideo);
+    if (parent == nullptr) {
+        return;
+    }
+
+    const auto fpsTenths = static_cast<UINT>(std::max<double>(0.0, std::lround(fps * 10.0)));
+    PostMessageW(parent, WM_USB_CAST_VIDEO_STATS, static_cast<WPARAM>(fpsTenths), static_cast<LPARAM>(frameCount));
 }
 
 void LogMediaType(const wchar_t* prefix, DWORD typeIndex, IMFMediaType* mediaType)
@@ -258,6 +271,48 @@ HRESULT ConfigureNv12Output(
     }
 
     LogMediaType(L"SourceReader output", 0, currentOutputType.Get());
+    return S_OK;
+}
+
+HRESULT ReadCurrentOutputInfo(
+    IMFSourceReader* reader,
+    UINT32& width,
+    UINT32& height,
+    UINT32& frameRateNumerator,
+    UINT32& frameRateDenominator,
+    bool logDetails)
+{
+    Microsoft::WRL::ComPtr<IMFMediaType> currentOutputType;
+    RETURN_IF_FAILED_LOG(
+        reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentOutputType),
+        L"IMFSourceReader::GetCurrentMediaType(current output)");
+
+    GUID subtype = GUID_NULL;
+    HRESULT hr = currentOutputType->GetGUID(MF_MT_SUBTYPE, &subtype);
+    if (FAILED(hr)) {
+        LogHResult(L"IMFMediaType::GetGUID(MF_MT_SUBTYPE current output)", hr);
+        return hr;
+    }
+
+    if (subtype != MFVideoFormat_NV12) {
+        Log::Write(L"SourceReader output changed away from NV12: subtype=%s", GuidToString(subtype).c_str());
+        return MF_E_INVALIDMEDIATYPE;
+    }
+
+    hr = MFGetAttributeSize(currentOutputType.Get(), MF_MT_FRAME_SIZE, &width, &height);
+    if (FAILED(hr)) {
+        LogHResult(L"MFGetAttributeSize(SourceReader current output)", hr);
+        return hr;
+    }
+
+    hr = MFGetAttributeRatio(currentOutputType.Get(), MF_MT_FRAME_RATE, &frameRateNumerator, &frameRateDenominator);
+    if (FAILED(hr) && hr != MF_E_ATTRIBUTENOTFOUND) {
+        LogHResult(L"MFGetAttributeRatio(SourceReader current output)", hr);
+    }
+
+    if (logDetails) {
+        LogMediaType(L"SourceReader current output", 0, currentOutputType.Get());
+    }
     return S_OK;
 }
 
@@ -691,12 +746,16 @@ HRESULT SourceReaderD3D11Player::GetNv12InputView(
             &cached.inputView),
         L"ID3D11VideoDevice::CreateVideoProcessorInputView(SourceReader)");
 
-    Log::Write(L"Cached NV12 DXVA input view: texture=%ux%u format=%u subresource=%u arraySlice=%u",
-        textureDesc.Width,
-        textureDesc.Height,
-        static_cast<unsigned int>(textureDesc.Format),
-        subresourceIndex,
-        arraySlice);
+    ++cachedInputViewLogCount_;
+    if (cachedInputViewLogCount_ <= 4 || (cachedInputViewLogCount_ % 120) == 0) {
+        Log::Write(L"Cached NV12 DXVA input view: count=%u texture=%ux%u format=%u subresource=%u arraySlice=%u",
+            cachedInputViewLogCount_,
+            textureDesc.Width,
+            textureDesc.Height,
+            static_cast<unsigned int>(textureDesc.Format),
+            subresourceIndex,
+            arraySlice);
+    }
 
     inputViewCache_.push_back(cached);
     if (inputViewCache_.size() > 32) {
@@ -776,6 +835,7 @@ void SourceReaderD3D11Player::ResetRenderResources()
     videoProcessorInputFrameRateDenominator_ = 0;
     videoProcessorOutputWidth_ = 0;
     videoProcessorOutputHeight_ = 0;
+    cachedInputViewLogCount_ = 0;
 }
 
 void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
@@ -896,6 +956,9 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         DWORD frameCount = 0;
         DWORD statsFrameCount = 0;
         ULONGLONG statsStart = GetTickCount64();
+        DWORD mediaTypeChangeCount = 0;
+        ULONGLONG lastMediaTypeRefreshMs = 0;
+        PostVideoStats(hwndVideo_, 0.0, 0);
 
         while (running_.load()) {
             DWORD streamIndex = 0;
@@ -922,19 +985,41 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             }
 
             if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
-                hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight, mediaFrameRateNumerator, mediaFrameRateDenominator);
-                if (FAILED(hr)) {
-                    break;
+                ++mediaTypeChangeCount;
+                const ULONGLONG mediaTypeNow = GetTickCount64();
+                const bool shouldRefreshMediaType =
+                    lastMediaTypeRefreshMs == 0 ||
+                    mediaTypeNow - lastMediaTypeRefreshMs >= 1000;
+
+                if (shouldRefreshMediaType) {
+                    const bool logDetails = mediaTypeChangeCount <= 3 || (mediaTypeChangeCount % 30) == 0;
+                    Log::Write(L"SourceReader output media type changed; count=%u. Reading current output type without reconfiguring decoder.", mediaTypeChangeCount);
+                    hr = ReadCurrentOutputInfo(
+                        sourceReader.Get(),
+                        frameWidth,
+                        frameHeight,
+                        mediaFrameRateNumerator,
+                        mediaFrameRateDenominator,
+                        logDetails);
+                    if (FAILED(hr)) {
+                        break;
+                    }
+                    lastMediaTypeRefreshMs = mediaTypeNow;
+
+                    renderFrameRateNumerator = mediaFrameRateNumerator;
+                    renderFrameRateDenominator = mediaFrameRateDenominator;
+                    if (options.targetVideoFps != 0) {
+                        renderFrameRateNumerator = options.targetVideoFps;
+                        renderFrameRateDenominator = 1;
+                        if (logDetails) {
+                            Log::Write(L"SourceReader renderer frame rate metadata forced by --video-fps after media type change: %u/1.", options.targetVideoFps);
+                        }
+                    }
+                    width_.store(frameWidth);
+                    height_.store(frameHeight);
+                } else if (mediaTypeChangeCount <= 3) {
+                    Log::Write(L"SourceReader suppressed repeated media type change event count=%u.", mediaTypeChangeCount);
                 }
-                renderFrameRateNumerator = mediaFrameRateNumerator;
-                renderFrameRateDenominator = mediaFrameRateDenominator;
-                if (options.targetVideoFps != 0) {
-                    renderFrameRateNumerator = options.targetVideoFps;
-                    renderFrameRateDenominator = 1;
-                    Log::Write(L"SourceReader renderer frame rate metadata forced by --video-fps after media type change: %u/1.", options.targetVideoFps);
-                }
-                width_.store(frameWidth);
-                height_.store(frameHeight);
             }
 
             if (!sample) {
@@ -951,11 +1036,17 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
             ++frameCount;
             ++statsFrameCount;
-            if (frameCount == 1 || statsFrameCount >= 120) {
-                const ULONGLONG now = GetTickCount64();
-                const ULONGLONG elapsedMs = std::max<ULONGLONG>(1, now - statsStart);
-                const double fps = static_cast<double>(statsFrameCount) * 1000.0 / static_cast<double>(elapsedMs);
-                Log::Write(L"SourceReader painted frame %u timestamp=%lld bytes=%u fps=%.1f",
+            const ULONGLONG now = GetTickCount64();
+            const ULONGLONG elapsedMs = now - statsStart;
+            if (frameCount == 1) {
+                statsStart = now;
+                statsFrameCount = 0;
+                PostVideoStats(hwndVideo_, 0.0, frameCount);
+                Log::Write(L"SourceReader painted first frame timestamp=%lld bytes=%u", timestamp, sampleByteCount);
+            } else if (elapsedMs >= 1000) {
+                const double fps = static_cast<double>(statsFrameCount) * 1000.0 / static_cast<double>(std::max<ULONGLONG>(1, elapsedMs));
+                PostVideoStats(hwndVideo_, fps, frameCount);
+                Log::Write(L"SourceReader render stats: frame=%u timestamp=%lld bytes=%u fps=%.1f",
                     frameCount,
                     timestamp,
                     sampleByteCount,

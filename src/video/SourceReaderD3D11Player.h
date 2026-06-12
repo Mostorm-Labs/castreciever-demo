@@ -69,4 +69,5 @@ private:
     UINT videoProcessorInputFrameRateDenominator_ = 0;
     UINT videoProcessorOutputWidth_ = 0;
     UINT videoProcessorOutputHeight_ = 0;
+    UINT cachedInputViewLogCount_ = 0;
 };

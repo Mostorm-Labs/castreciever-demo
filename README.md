@@ -65,6 +65,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 
 - Win32 main window with a child video window.
 - Right-side icon control rail for mute/unmute, stop, and maximize/restore.
+- On-screen render FPS overlay in the upper-left corner for quick smoothness diagnostics.
 - ESC restores a maximized window, otherwise closes the application.
 - UVC enumeration through Media Foundation device sources.
 - UAC enumeration through MMDevice API.

@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "AppMessages.h"
 #include "HResult.h"
 #include "Log.h"
 #include "audio/IAudioPlayer.h"
@@ -13,10 +14,16 @@ namespace {
 
 constexpr wchar_t kMainWindowClassName[] = L"UsbCastReceiverMainWindow";
 constexpr wchar_t kVideoWindowClassName[] = L"UsbCastReceiverVideoWindow";
+constexpr wchar_t kStatsWindowClassName[] = L"UsbCastReceiverStatsWindow";
 constexpr wchar_t kSelfTestPaintProperty[] = L"UsbCastReceiverSelfTestPaint";
+constexpr wchar_t kStatsFpsProperty[] = L"UsbCastReceiverStatsFpsTenths";
+constexpr wchar_t kStatsFrameCountProperty[] = L"UsbCastReceiverStatsFrameCount";
 constexpr int kMinWindowWidth = 480;
 constexpr int kMinWindowHeight = 270;
 constexpr int kResizeBorderWidth = 8;
+constexpr int kStatsOverlayWidth = 168;
+constexpr int kStatsOverlayHeight = 56;
+constexpr int kStatsOverlayMargin = 12;
 
 POINT ScreenPointFromLParam(LPARAM lParam)
 {
@@ -121,6 +128,130 @@ LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     }
 }
 
+LRESULT CALLBACK StatsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT: {
+        PAINTSTRUCT paint = {};
+        HDC dc = BeginPaint(hwnd, &paint);
+
+        RECT client = {};
+        GetClientRect(hwnd, &client);
+
+        HBRUSH background = CreateSolidBrush(RGB(18, 20, 22));
+        if (background != nullptr) {
+            FillRect(dc, &client, background);
+            DeleteObject(background);
+        }
+
+        SetBkMode(dc, TRANSPARENT);
+
+        HFONT labelFont = CreateFontW(
+            13,
+            0,
+            0,
+            0,
+            FW_MEDIUM,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_SWISS,
+            L"Segoe UI");
+        HFONT valueFont = CreateFontW(
+            22,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_SWISS,
+            L"Segoe UI");
+
+        HANDLE fpsProp = GetPropW(hwnd, kStatsFpsProperty);
+        HANDLE frameProp = GetPropW(hwnd, kStatsFrameCountProperty);
+        UINT fpsTenths = fpsProp != nullptr ? static_cast<UINT>(reinterpret_cast<UINT_PTR>(fpsProp) - 1) : 0;
+        UINT frameCount = frameProp != nullptr ? static_cast<UINT>(reinterpret_cast<UINT_PTR>(frameProp) - 1) : 0;
+
+        wchar_t fpsText[32] = {};
+        StringCchPrintfW(fpsText, ARRAYSIZE(fpsText), L"%u.%u FPS", fpsTenths / 10, fpsTenths % 10);
+
+        wchar_t frameText[48] = {};
+        StringCchPrintfW(frameText, ARRAYSIZE(frameText), L"frames %u", frameCount);
+
+        RECT labelRect = client;
+        labelRect.left += 12;
+        labelRect.top += 6;
+        labelRect.right -= 12;
+
+        HGDIOBJ oldFont = nullptr;
+        if (labelFont != nullptr) {
+            oldFont = SelectObject(dc, labelFont);
+        }
+        SetTextColor(dc, RGB(160, 168, 176));
+        DrawTextW(dc, L"RENDER", -1, &labelRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+        RECT valueRect = client;
+        valueRect.left += 12;
+        valueRect.top += 20;
+        valueRect.right -= 12;
+        if (valueFont != nullptr) {
+            SelectObject(dc, valueFont);
+        }
+        SetTextColor(dc, RGB(112, 232, 136));
+        DrawTextW(dc, fpsText, -1, &valueRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+        RECT frameRect = client;
+        frameRect.left += 12;
+        frameRect.top += 42;
+        frameRect.right -= 12;
+        if (labelFont != nullptr) {
+            SelectObject(dc, labelFont);
+        }
+        SetTextColor(dc, RGB(210, 214, 218));
+        DrawTextW(dc, frameText, -1, &frameRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+        if (oldFont != nullptr) {
+            SelectObject(dc, oldFont);
+        }
+        if (labelFont != nullptr) {
+            DeleteObject(labelFont);
+        }
+        if (valueFont != nullptr) {
+            DeleteObject(valueFont);
+        }
+
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+
+    case WM_NCDESTROY:
+        RemovePropW(hwnd, kStatsFpsProperty);
+        RemovePropW(hwnd, kStatsFrameCountProperty);
+        break;
+
+    default:
+        break;
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
 } // namespace
 
 MainWindow::MainWindow() = default;
@@ -209,6 +340,23 @@ HRESULT MainWindow::RegisterWindowClass()
         }
     }
 
+    WNDCLASSEXW statsWc = {};
+    statsWc.cbSize = sizeof(statsWc);
+    statsWc.lpfnWndProc = StatsWindowProc;
+    statsWc.hInstance = instance_;
+    statsWc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    statsWc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    statsWc.lpszClassName = kStatsWindowClassName;
+
+    if (RegisterClassExW(&statsWc) == 0) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_CLASS_ALREADY_EXISTS) {
+            const HRESULT hr = HRESULT_FROM_WIN32(error);
+            LogHResult(L"RegisterClassExW(stats)", hr);
+            return hr;
+        }
+    }
+
     return S_OK;
 }
 
@@ -234,6 +382,26 @@ HRESULT MainWindow::OnCreate()
         return hr;
     }
 
+    statsHwnd_ = CreateWindowExW(
+        0,
+        kStatsWindowClassName,
+        nullptr,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        kStatsOverlayMargin,
+        kStatsOverlayMargin,
+        kStatsOverlayWidth,
+        kStatsOverlayHeight,
+        hwnd_,
+        nullptr,
+        instance_,
+        nullptr);
+
+    if (statsHwnd_ == nullptr) {
+        const HRESULT hr = HResultFromLastError();
+        LogHResult(L"CreateWindowExW(stats)", hr);
+        return hr;
+    }
+
     RETURN_IF_FAILED_LOG(controls_.Create(hwnd_, instance_), L"OverlayControls::Create");
 
     RECT client = {};
@@ -248,6 +416,17 @@ void MainWindow::OnSize(UINT width, UINT height)
         MoveWindow(videoHwnd_, 0, 0, static_cast<int>(width), static_cast<int>(height), TRUE);
     }
 
+    if (statsHwnd_ != nullptr) {
+        SetWindowPos(
+            statsHwnd_,
+            HWND_TOP,
+            kStatsOverlayMargin,
+            kStatsOverlayMargin,
+            kStatsOverlayWidth,
+            kStatsOverlayHeight,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
     RECT client = {};
     client.right = static_cast<LONG>(width);
     client.bottom = static_cast<LONG>(height);
@@ -256,6 +435,18 @@ void MainWindow::OnSize(UINT width, UINT height)
 
     if (videoPlayer_ != nullptr) {
         videoPlayer_->Resize(width, height);
+    }
+}
+
+void MainWindow::OnVideoStats(UINT fpsTenths, UINT frameCount)
+{
+    statsFpsTenths_ = fpsTenths;
+    statsFrameCount_ = frameCount;
+
+    if (statsHwnd_ != nullptr) {
+        SetPropW(statsHwnd_, kStatsFpsProperty, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(statsFpsTenths_) + 1));
+        SetPropW(statsHwnd_, kStatsFrameCountProperty, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(statsFrameCount_) + 1));
+        InvalidateRect(statsHwnd_, nullptr, FALSE);
     }
 }
 
@@ -373,6 +564,10 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         }
         return 0;
 
+    case WM_USB_CAST_VIDEO_STATS:
+        OnVideoStats(static_cast<UINT>(wParam), static_cast<UINT>(lParam));
+        return 0;
+
     case WM_GETMINMAXINFO:
         if (lParam != 0) {
             auto* minMaxInfo = reinterpret_cast<MINMAXINFO*>(lParam);
@@ -417,6 +612,7 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_NCDESTROY:
         hwnd_ = nullptr;
         videoHwnd_ = nullptr;
+        statsHwnd_ = nullptr;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         return DefWindowProcW(hwnd, message, wParam, lParam);
 
