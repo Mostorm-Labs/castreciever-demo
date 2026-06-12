@@ -55,6 +55,7 @@ private:
     UINT dxgiDeviceManagerResetToken_ = 0;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> swapChainBackBuffer_;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> swapChainRenderTargetView_;
     Microsoft::WRL::ComPtr<ID3D11VideoDevice> videoDevice_;
     Microsoft::WRL::ComPtr<ID3D11VideoContext> videoContext_;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> videoProcessorEnumerator_;

@@ -10,9 +10,11 @@
 namespace {
 
 constexpr wchar_t kOverlayControlsClassName[] = L"UsbCastReceiverOverlayControls";
-constexpr int kRailWidth = 70;
-constexpr int kButtonSize = 46;
-constexpr int kButtonGap = 18;
+constexpr COLORREF kTransparentColor = RGB(255, 0, 255);
+constexpr int kButtonSize = 64;
+constexpr int kButtonGap = 20;
+constexpr int kOverlayPadding = 14;
+constexpr int kOverlayRightMargin = 18;
 constexpr double kPi = 3.14159265358979323846;
 
 struct ScopedPen {
@@ -32,7 +34,7 @@ RECT ButtonRectForIndex(const RECT& client, int index)
     const int height = client.bottom - client.top;
     const int totalHeight = kButtonSize * 3 + kButtonGap * 2;
     const int x = client.left + ((client.right - client.left) - kButtonSize) / 2;
-    const int yStart = std::max(16, (height - totalHeight) / 2);
+    const int yStart = std::max(0, (height - totalHeight) / 2);
     const int y = yStart + index * (kButtonSize + kButtonGap);
     return RECT { x, y, x + kButtonSize, y + kButtonSize };
 }
@@ -85,8 +87,8 @@ void DrawArcPolyline(HDC dc, int centerX, int centerY, int radius, double startD
 
 void DrawButtonShell(HDC dc, const RECT& rect, bool hovered, bool pressed, bool danger)
 {
-    COLORREF fill = RGB(28, 28, 28);
-    COLORREF outline = RGB(78, 78, 78);
+    COLORREF fill = RGB(24, 24, 24);
+    COLORREF outline = RGB(86, 86, 86);
     if (hovered) {
         fill = danger ? RGB(46, 22, 22) : RGB(42, 42, 42);
         outline = danger ? RGB(170, 58, 58) : RGB(112, 112, 112);
@@ -97,7 +99,7 @@ void DrawButtonShell(HDC dc, const RECT& rect, bool hovered, bool pressed, bool 
     }
 
     ScopedBrush brush(CreateSolidBrush(fill));
-    ScopedPen pen(CreatePen(PS_SOLID, 1, outline));
+    ScopedPen pen(CreatePen(PS_SOLID, 2, outline));
     HGDIOBJ oldBrush = SelectObject(dc, brush.brush);
     HGDIOBJ oldPen = SelectObject(dc, pen.pen);
     Ellipse(dc, rect.left, rect.top, rect.right, rect.bottom);
@@ -105,35 +107,42 @@ void DrawButtonShell(HDC dc, const RECT& rect, bool hovered, bool pressed, bool 
     SelectObject(dc, oldBrush);
 }
 
+int ScaleForButton(const RECT& rect, int value)
+{
+    const int size = std::max(1, rect.right - rect.left);
+    return std::max(1, MulDiv(value, size, 46));
+}
+
 void DrawAudioIcon(HDC dc, const RECT& rect, bool muted)
 {
     const int centerX = (rect.left + rect.right) / 2;
     const int centerY = (rect.top + rect.bottom) / 2;
     const COLORREF iconColor = RGB(245, 245, 245);
+    const int penWidth = ScaleForButton(rect, 3);
 
     ScopedBrush brush(CreateSolidBrush(iconColor));
-    ScopedPen pen(CreatePen(PS_SOLID, 3, iconColor));
+    ScopedPen pen(CreatePen(PS_SOLID, penWidth, iconColor));
     HGDIOBJ oldBrush = SelectObject(dc, brush.brush);
     HGDIOBJ oldPen = SelectObject(dc, pen.pen);
 
     POINT speaker[] = {
-        { centerX - 16, centerY - 6 },
-        { centerX - 9, centerY - 6 },
-        { centerX, centerY - 14 },
-        { centerX, centerY + 14 },
-        { centerX - 9, centerY + 6 },
-        { centerX - 16, centerY + 6 },
+        { centerX - ScaleForButton(rect, 16), centerY - ScaleForButton(rect, 6) },
+        { centerX - ScaleForButton(rect, 9), centerY - ScaleForButton(rect, 6) },
+        { centerX, centerY - ScaleForButton(rect, 14) },
+        { centerX, centerY + ScaleForButton(rect, 14) },
+        { centerX - ScaleForButton(rect, 9), centerY + ScaleForButton(rect, 6) },
+        { centerX - ScaleForButton(rect, 16), centerY + ScaleForButton(rect, 6) },
     };
     Polygon(dc, speaker, ARRAYSIZE(speaker));
 
     if (muted) {
-        MoveToEx(dc, centerX + 8, centerY - 10, nullptr);
-        LineTo(dc, centerX + 20, centerY + 10);
-        MoveToEx(dc, centerX + 20, centerY - 10, nullptr);
-        LineTo(dc, centerX + 8, centerY + 10);
+        MoveToEx(dc, centerX + ScaleForButton(rect, 8), centerY - ScaleForButton(rect, 10), nullptr);
+        LineTo(dc, centerX + ScaleForButton(rect, 20), centerY + ScaleForButton(rect, 10));
+        MoveToEx(dc, centerX + ScaleForButton(rect, 20), centerY - ScaleForButton(rect, 10), nullptr);
+        LineTo(dc, centerX + ScaleForButton(rect, 8), centerY + ScaleForButton(rect, 10));
     } else {
-        DrawArcPolyline(dc, centerX + 2, centerY, 11, -42.0, 84.0);
-        DrawArcPolyline(dc, centerX + 4, centerY, 18, -38.0, 76.0);
+        DrawArcPolyline(dc, centerX + ScaleForButton(rect, 2), centerY, ScaleForButton(rect, 11), -42.0, 84.0);
+        DrawArcPolyline(dc, centerX + ScaleForButton(rect, 4), centerY, ScaleForButton(rect, 18), -38.0, 76.0);
     }
 
     SelectObject(dc, oldPen);
@@ -143,21 +152,31 @@ void DrawAudioIcon(HDC dc, const RECT& rect, bool muted)
 void DrawFullscreenIcon(HDC dc, const RECT& rect, bool maximized)
 {
     const COLORREF iconColor = RGB(245, 245, 245);
-    ScopedPen pen(CreatePen(PS_SOLID, 3, iconColor));
+    ScopedPen pen(CreatePen(PS_SOLID, ScaleForButton(rect, 3), iconColor));
     HGDIOBJ oldPen = SelectObject(dc, pen.pen);
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
 
     if (maximized) {
-        RECT back = { rect.left + 15, rect.top + 12, rect.right - 10, rect.bottom - 16 };
-        RECT front = { rect.left + 10, rect.top + 17, rect.right - 15, rect.bottom - 11 };
-        RoundRect(dc, back.left, back.top, back.right, back.bottom, 3, 3);
-        RoundRect(dc, front.left, front.top, front.right, front.bottom, 3, 3);
+        RECT back = {
+            rect.left + ScaleForButton(rect, 15),
+            rect.top + ScaleForButton(rect, 12),
+            rect.right - ScaleForButton(rect, 10),
+            rect.bottom - ScaleForButton(rect, 16),
+        };
+        RECT front = {
+            rect.left + ScaleForButton(rect, 10),
+            rect.top + ScaleForButton(rect, 17),
+            rect.right - ScaleForButton(rect, 15),
+            rect.bottom - ScaleForButton(rect, 11),
+        };
+        RoundRect(dc, back.left, back.top, back.right, back.bottom, ScaleForButton(rect, 3), ScaleForButton(rect, 3));
+        RoundRect(dc, front.left, front.top, front.right, front.bottom, ScaleForButton(rect, 3), ScaleForButton(rect, 3));
     } else {
-        const int left = rect.left + 13;
-        const int right = rect.right - 13;
-        const int top = rect.top + 13;
-        const int bottom = rect.bottom - 13;
-        const int leg = 8;
+        const int left = rect.left + ScaleForButton(rect, 13);
+        const int right = rect.right - ScaleForButton(rect, 13);
+        const int top = rect.top + ScaleForButton(rect, 13);
+        const int bottom = rect.bottom - ScaleForButton(rect, 13);
+        const int leg = ScaleForButton(rect, 8);
 
         MoveToEx(dc, left, top + leg, nullptr);
         LineTo(dc, left, top);
@@ -183,15 +202,15 @@ void DrawFullscreenIcon(HDC dc, const RECT& rect, bool maximized)
 void DrawPowerIcon(HDC dc, const RECT& rect)
 {
     const int centerX = (rect.left + rect.right) / 2;
-    const int centerY = (rect.top + rect.bottom) / 2 + 2;
+    const int centerY = (rect.top + rect.bottom) / 2 + ScaleForButton(rect, 2);
     const COLORREF iconColor = RGB(255, 70, 70);
 
-    ScopedPen pen(CreatePen(PS_SOLID, 4, iconColor));
+    ScopedPen pen(CreatePen(PS_SOLID, ScaleForButton(rect, 4), iconColor));
     HGDIOBJ oldPen = SelectObject(dc, pen.pen);
 
-    DrawArcPolyline(dc, centerX, centerY, 13, 140.0, 260.0);
-    MoveToEx(dc, centerX, centerY - 19, nullptr);
-    LineTo(dc, centerX, centerY - 4);
+    DrawArcPolyline(dc, centerX, centerY, ScaleForButton(rect, 13), 140.0, 260.0);
+    MoveToEx(dc, centerX, centerY - ScaleForButton(rect, 19), nullptr);
+    LineTo(dc, centerX, centerY - ScaleForButton(rect, 4));
 
     SelectObject(dc, oldPen);
 }
@@ -227,7 +246,7 @@ HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
     RETURN_IF_FAILED_LOG(RegisterOverlayClass(instance), L"RegisterOverlayClass");
 
     hwnd_ = CreateWindowExW(
-        0,
+        WS_EX_LAYERED,
         kOverlayControlsClassName,
         nullptr,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
@@ -245,6 +264,10 @@ HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
         return hr;
     }
 
+    if (!SetLayeredWindowAttributes(hwnd_, kTransparentColor, 0, LWA_COLORKEY)) {
+        LogHResult(L"SetLayeredWindowAttributes(overlay controls)", HResultFromLastError());
+    }
+
     return S_OK;
 }
 
@@ -256,10 +279,14 @@ void OverlayControls::Layout(const RECT& client)
 
     const int clientWidth = client.right - client.left;
     const int clientHeight = client.bottom - client.top;
-    const int width = std::min(kRailWidth, std::max(0, clientWidth));
-    const int x = std::max(0, clientWidth - width);
+    const int desiredWidth = kButtonSize + kOverlayPadding * 2;
+    const int desiredHeight = kButtonSize * 3 + kButtonGap * 2 + kOverlayPadding * 2;
+    const int width = std::min(desiredWidth, std::max(0, clientWidth));
+    const int height = std::min(desiredHeight, std::max(0, clientHeight));
+    const int x = std::max(0, clientWidth - width - kOverlayRightMargin);
+    const int y = std::max(0, (clientHeight - height) / 2);
 
-    MoveWindow(hwnd_, x, 0, width, clientHeight, TRUE);
+    MoveWindow(hwnd_, x, y, width, height, TRUE);
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 }
 
@@ -397,14 +424,8 @@ void OverlayControls::Paint(HDC dc)
     RECT client = {};
     GetClientRect(hwnd_, &client);
 
-    ScopedBrush railBrush(CreateSolidBrush(RGB(10, 10, 10)));
-    FillRect(dc, &client, railBrush.brush);
-
-    ScopedPen dividerPen(CreatePen(PS_SOLID, 1, RGB(36, 36, 36)));
-    HGDIOBJ oldPen = SelectObject(dc, dividerPen.pen);
-    MoveToEx(dc, client.left, client.top, nullptr);
-    LineTo(dc, client.left, client.bottom);
-    SelectObject(dc, oldPen);
+    ScopedBrush transparentBrush(CreateSolidBrush(kTransparentColor));
+    FillRect(dc, &client, transparentBrush.brush);
 
     const int commands[] = {
         ID_BTN_MUTE,

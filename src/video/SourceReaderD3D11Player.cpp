@@ -65,6 +65,76 @@ void NormalizeFrameRate(UINT32& numerator, UINT32& denominator)
     }
 }
 
+bool UsePreferredVisibleSizeForAlignedOutput(
+    UINT32 preferredWidth,
+    UINT32 preferredHeight,
+    UINT32 outputWidth,
+    UINT32 outputHeight,
+    UINT32& displayWidth,
+    UINT32& displayHeight,
+    bool logDetails)
+{
+    displayWidth = outputWidth;
+    displayHeight = outputHeight;
+
+    if (preferredWidth == 0 || preferredHeight == 0 || outputWidth != preferredWidth || outputHeight <= preferredHeight) {
+        return false;
+    }
+
+    const UINT32 paddingRows = outputHeight - preferredHeight;
+    if (paddingRows > 16) {
+        return false;
+    }
+
+    displayWidth = preferredWidth;
+    displayHeight = preferredHeight;
+    if (logDetails) {
+        Log::Write(L"Using visible video size %ux%u inside aligned decoder output %ux%u.",
+            displayWidth,
+            displayHeight,
+            outputWidth,
+            outputHeight);
+    }
+    return true;
+}
+
+RECT CalculateAspectFitRect(UINT sourceWidth, UINT sourceHeight, UINT targetWidth, UINT targetHeight)
+{
+    RECT rect = {};
+    if (sourceWidth == 0 || sourceHeight == 0 || targetWidth == 0 || targetHeight == 0) {
+        return rect;
+    }
+
+    const double scaleX = static_cast<double>(targetWidth) / static_cast<double>(sourceWidth);
+    const double scaleY = static_cast<double>(targetHeight) / static_cast<double>(sourceHeight);
+    const double scale = std::min(scaleX, scaleY);
+    const LONG width = std::min<LONG>(
+        static_cast<LONG>(targetWidth),
+        std::max<LONG>(1, static_cast<LONG>(std::lround(static_cast<double>(sourceWidth) * scale))));
+    const LONG height = std::min<LONG>(
+        static_cast<LONG>(targetHeight),
+        std::max<LONG>(1, static_cast<LONG>(std::lround(static_cast<double>(sourceHeight) * scale))));
+    const LONG left = (static_cast<LONG>(targetWidth) - width) / 2;
+    const LONG top = (static_cast<LONG>(targetHeight) - height) / 2;
+
+    rect.left = left;
+    rect.top = top;
+    rect.right = left + width;
+    rect.bottom = top + height;
+    return rect;
+}
+
+const wchar_t* ScaleModeName(UINT sourceWidth, UINT sourceHeight, UINT targetWidth, UINT targetHeight)
+{
+    if (sourceWidth == targetWidth && sourceHeight == targetHeight) {
+        return L"1:1";
+    }
+
+    const UINT64 sourceAspect = static_cast<UINT64>(sourceWidth) * targetHeight;
+    const UINT64 targetAspect = static_cast<UINT64>(targetWidth) * sourceHeight;
+    return sourceAspect == targetAspect ? L"resample" : L"aspect-fit";
+}
+
 void PostVideoStats(HWND hwndVideo, double fps, DWORD frameCount)
 {
     HWND parent = GetParent(hwndVideo);
@@ -581,7 +651,9 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
         Log::Write(L"SourceReader D3D11 swap chain created: %ux%u", clientWidth, clientHeight);
     } else if (clientWidth != swapChainWidth_ || clientHeight != swapChainHeight_) {
         videoOutputView_.Reset();
+        swapChainRenderTargetView_.Reset();
         swapChainBackBuffer_.Reset();
+        d3dContext_->OMSetRenderTargets(0, nullptr, nullptr);
 
         HRESULT hr = swapChain_->ResizeBuffers(0, clientWidth, clientHeight, DXGI_FORMAT_UNKNOWN, 0);
         if (FAILED(hr)) {
@@ -596,6 +668,12 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
 
     if (!swapChainBackBuffer_) {
         RETURN_IF_FAILED_LOG(swapChain_->GetBuffer(0, IID_PPV_ARGS(&swapChainBackBuffer_)), L"IDXGISwapChain::GetBuffer(SourceReader)");
+    }
+
+    if (!swapChainRenderTargetView_) {
+        RETURN_IF_FAILED_LOG(
+            d3dDevice_->CreateRenderTargetView(swapChainBackBuffer_.Get(), nullptr, &swapChainRenderTargetView_),
+            L"ID3D11Device::CreateRenderTargetView(SourceReader)");
     }
 
     return S_OK;
@@ -663,15 +741,19 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(
         videoProcessorOutputWidth_ = swapChainWidth_;
         videoProcessorOutputHeight_ = swapChainHeight_;
 
-        const bool oneToOneOutput = frameWidth == swapChainWidth_ && frameHeight == swapChainHeight_;
-        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u fps=%u/%u output=%ux%u scale=%s",
+        const RECT destinationRect = CalculateAspectFitRect(frameWidth, frameHeight, swapChainWidth_, swapChainHeight_);
+        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u fps=%u/%u output=%ux%u dest=(%ld,%ld)-(%ld,%ld) scale=%s",
             frameWidth,
             frameHeight,
             frameRateNumerator,
             frameRateDenominator,
             swapChainWidth_,
             swapChainHeight_,
-            oneToOneOutput ? L"1:1" : L"resample");
+            destinationRect.left,
+            destinationRect.top,
+            destinationRect.right,
+            destinationRect.bottom,
+            ScaleModeName(frameWidth, frameHeight, swapChainWidth_, swapChainHeight_));
     }
 
     if (!videoOutputView_) {
@@ -817,20 +899,26 @@ HRESULT SourceReaderD3D11Player::DrawNv12Frame(ID3D11VideoProcessorInputView* in
         return E_INVALIDARG;
     }
 
+    if (swapChainRenderTargetView_) {
+        constexpr float black[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        d3dContext_->ClearRenderTargetView(swapChainRenderTargetView_.Get(), black);
+    }
+
     RECT sourceRect = {
         0,
         0,
         static_cast<LONG>(frameWidth),
         static_cast<LONG>(frameHeight),
     };
-    RECT destinationRect = {
+    RECT outputRect = {
         0,
         0,
         static_cast<LONG>(swapChainWidth_),
         static_cast<LONG>(swapChainHeight_),
     };
+    const RECT destinationRect = CalculateAspectFitRect(frameWidth, frameHeight, swapChainWidth_, swapChainHeight_);
 
-    videoContext_->VideoProcessorSetOutputTargetRect(videoProcessor_.Get(), TRUE, &destinationRect);
+    videoContext_->VideoProcessorSetOutputTargetRect(videoProcessor_.Get(), TRUE, &outputRect);
     videoContext_->VideoProcessorSetStreamFrameFormat(videoProcessor_.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
     videoContext_->VideoProcessorSetStreamSourceRect(videoProcessor_.Get(), 0, TRUE, &sourceRect);
     videoContext_->VideoProcessorSetStreamDestRect(videoProcessor_.Get(), 0, TRUE, &destinationRect);
@@ -867,6 +955,7 @@ void SourceReaderD3D11Player::ResetRenderResources()
     videoProcessorEnumerator_.Reset();
     videoContext_.Reset();
     videoDevice_.Reset();
+    swapChainRenderTargetView_.Reset();
     swapChainBackBuffer_.Reset();
     swapChain_.Reset();
     dxgiDeviceManager_.Reset();
@@ -977,11 +1066,27 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             break;
         }
 
+        UINT32 preferredVisibleWidth = frameWidth;
+        UINT32 preferredVisibleHeight = frameHeight;
+
         hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight, mediaFrameRateNumerator, mediaFrameRateDenominator);
         if (FAILED(hr)) {
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: configuring NV12 DXVA decoder output");
             break;
         }
+
+        UINT32 displayFrameWidth = frameWidth;
+        UINT32 displayFrameHeight = frameHeight;
+        UsePreferredVisibleSizeForAlignedOutput(
+            preferredVisibleWidth,
+            preferredVisibleHeight,
+            frameWidth,
+            frameHeight,
+            displayFrameWidth,
+            displayFrameHeight,
+            true);
+        frameWidth = displayFrameWidth;
+        frameHeight = displayFrameHeight;
 
         UINT32 renderFrameRateNumerator = mediaFrameRateNumerator;
         UINT32 renderFrameRateDenominator = mediaFrameRateDenominator;
@@ -1045,10 +1150,12 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                 if (shouldRefreshMediaType) {
                     const bool logDetails = mediaTypeChangeCount <= 3 || (mediaTypeChangeCount % 30) == 0;
                     Log::Write(L"SourceReader output media type changed; count=%u. Reading current output type without reconfiguring decoder.", mediaTypeChangeCount);
+                    UINT32 outputFrameWidth = frameWidth;
+                    UINT32 outputFrameHeight = frameHeight;
                     hr = ReadCurrentOutputInfo(
                         sourceReader.Get(),
-                        frameWidth,
-                        frameHeight,
+                        outputFrameWidth,
+                        outputFrameHeight,
                         mediaFrameRateNumerator,
                         mediaFrameRateDenominator,
                         logDetails);
@@ -1056,6 +1163,22 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                         break;
                     }
                     lastMediaTypeRefreshMs = mediaTypeNow;
+
+                    UINT32 displayWidth = outputFrameWidth;
+                    UINT32 displayHeight = outputFrameHeight;
+                    if (!UsePreferredVisibleSizeForAlignedOutput(
+                            preferredVisibleWidth,
+                            preferredVisibleHeight,
+                            outputFrameWidth,
+                            outputFrameHeight,
+                            displayWidth,
+                            displayHeight,
+                            logDetails)) {
+                        preferredVisibleWidth = outputFrameWidth;
+                        preferredVisibleHeight = outputFrameHeight;
+                    }
+                    frameWidth = displayWidth;
+                    frameHeight = displayHeight;
 
                     renderFrameRateNumerator = mediaFrameRateNumerator;
                     renderFrameRateDenominator = mediaFrameRateDenominator;
