@@ -1,0 +1,64 @@
+# Build output
+/build/
+/out/
+/dist/
+/install/
+/logs/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+compile_commands.json
+CMakeUserPresets.json
+
+# Visual Studio generated state
+.vs/
+ipch/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.vcxproj.user
+
+# MSVC and native build artifacts
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+*.exe
+*.app
+*.res
+*.tlog
+*.lastbuildstate
+*.log
+
+# Test and package artifacts
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.nupkg
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
