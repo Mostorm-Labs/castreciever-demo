@@ -83,6 +83,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 
 ## Troubleshooting
 
+- The app writes a UTF-8 diagnostic log on startup. The preferred location is `%LOCALAPPDATA%\UsbCastReceiver\logs\UsbCastReceiver-YYYYMMDD-HHMMSS-PID.log`; if that cannot be opened, it falls back to a `logs` directory beside the executable and then the system temp directory. The first log line also prints the chosen path to Visual Studio Output. If the process exits because of an unhandled exception or `std::terminate`, the last log lines should include that failure.
 - `CoCreateInstance(CLSID_MFCaptureEngine) failed: 0x80004002 (No such interface supported)` means the app could not obtain `IMFCaptureEngine` before opening the UVC device. The code now first tries `IMFCaptureEngineClassFactory::CreateInstance`, then falls back to direct `CLSID_MFCaptureEngine` creation and logs both HRESULT values.
 - If Capture Engine creation still fails, verify the machine is a full Windows 10/11 desktop install with Media Foundation components available. Windows N/KN editions may require the Media Feature Pack.
 - If Capture Engine creation succeeds but `IMFCaptureEngine::Initialize` fails, investigate device selection, camera privacy settings, device occupation by another process, UVC driver behavior, and supported media types.

@@ -22,6 +22,7 @@ string(TIMESTAMP USB_CAST_RECEIVER_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
 
 add_executable(UsbCastReceiver WIN32
     src/main.cpp
+    src/Log.cpp
     src/App.cpp
     src/MainWindow.cpp
     src/device/UvcDeviceEnumerator.cpp

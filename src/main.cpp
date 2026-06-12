@@ -6,6 +6,7 @@
 #include <shellapi.h>
 
 #include <cstdlib>
+#include <exception>
 #include <string>
 
 namespace {
@@ -93,9 +94,14 @@ AppOptions ParseCommandLine()
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 {
+    Log::Initialize();
+    SetUnhandledExceptionFilter(Log::UnhandledExceptionFilter);
+    std::set_terminate(Log::TerminateHandler);
+
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHResult(L"CoInitializeEx", hr);
+        Log::Shutdown();
         return static_cast<int>(hr);
     }
 
@@ -103,6 +109,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     if (FAILED(hr)) {
         LogHResult(L"MFStartup", hr);
         CoUninitialize();
+        Log::Shutdown();
         return static_cast<int>(hr);
     }
 
@@ -139,5 +146,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 
     LOG_IF_FAILED(MFShutdown(), L"MFShutdown");
     CoUninitialize();
+    Log::Shutdown();
     return exitCode;
 }
