@@ -19,6 +19,7 @@ enum class VideoBackend {
 struct VideoStartOptions {
     std::wstring deviceMatch;
     bool preferH264 = true;
+    UINT32 targetVideoFps = 0;
     PreviewSinkMode previewSinkMode = PreviewSinkMode::Default;
 };
 

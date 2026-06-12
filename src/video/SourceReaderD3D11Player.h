@@ -26,10 +26,10 @@ public:
 private:
     HRESULT InitializeD3D11();
     HRESULT InitializeDxgiDeviceManager();
-    HRESULT EnsureRenderResources(UINT32 frameWidth, UINT32 frameHeight);
+    HRESULT EnsureRenderResources(UINT32 frameWidth, UINT32 frameHeight, UINT32 frameRateNumerator, UINT32 frameRateDenominator);
     HRESULT EnsureSwapChain(UINT clientWidth, UINT clientHeight);
-    HRESULT EnsureVideoProcessor(UINT32 frameWidth, UINT32 frameHeight);
-    HRESULT RenderNv12Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount);
+    HRESULT EnsureVideoProcessor(UINT32 frameWidth, UINT32 frameHeight, UINT32 frameRateNumerator, UINT32 frameRateDenominator);
+    HRESULT RenderNv12Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, UINT32 frameRateNumerator, UINT32 frameRateDenominator, DWORD& byteCount);
     HRESULT GetNv12InputView(
         ID3D11Texture2D* texture,
         UINT subresourceIndex,
@@ -65,6 +65,8 @@ private:
     UINT swapChainHeight_ = 0;
     UINT videoProcessorInputWidth_ = 0;
     UINT videoProcessorInputHeight_ = 0;
+    UINT videoProcessorInputFrameRateNumerator_ = 0;
+    UINT videoProcessorInputFrameRateDenominator_ = 0;
     UINT videoProcessorOutputWidth_ = 0;
     UINT videoProcessorOutputHeight_ = 0;
 };

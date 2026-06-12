@@ -39,6 +39,30 @@ const wchar_t* VideoSubtypeName(REFGUID subtype)
     return L"Unknown";
 }
 
+bool FrameRateMatchesTarget(UINT32 numerator, UINT32 denominator, UINT32 targetFps)
+{
+    if (targetFps == 0) {
+        return true;
+    }
+
+    if (numerator == 0 || denominator == 0) {
+        return false;
+    }
+
+    const double fps = static_cast<double>(numerator) / static_cast<double>(denominator);
+    const double target = static_cast<double>(targetFps);
+    const double delta = fps > target ? fps - target : target - fps;
+    return delta < 0.25;
+}
+
+void NormalizeFrameRate(UINT32& numerator, UINT32& denominator)
+{
+    if (numerator == 0 || denominator == 0) {
+        numerator = 30;
+        denominator = 1;
+    }
+}
+
 void LogMediaType(const wchar_t* prefix, DWORD typeIndex, IMFMediaType* mediaType)
 {
     GUID subtype = GUID_NULL;
@@ -73,12 +97,24 @@ void LogMediaType(const wchar_t* prefix, DWORD typeIndex, IMFMediaType* mediaTyp
         frameRateDenominator);
 }
 
-HRESULT SelectNativeVideoType(IMFSourceReader* reader, bool preferH264, UINT32& width, UINT32& height)
+HRESULT SelectNativeVideoType(
+    IMFSourceReader* reader,
+    bool preferH264,
+    UINT32 targetVideoFps,
+    UINT32& width,
+    UINT32& height,
+    UINT32& frameRateNumerator,
+    UINT32& frameRateDenominator)
 {
     width = 0;
     height = 0;
+    frameRateNumerator = 0;
+    frameRateDenominator = 0;
 
     Microsoft::WRL::ComPtr<IMFMediaType> firstType;
+    Microsoft::WRL::ComPtr<IMFMediaType> firstTargetFpsType;
+    Microsoft::WRL::ComPtr<IMFMediaType> firstH264Type;
+    Microsoft::WRL::ComPtr<IMFMediaType> firstH264TargetFpsType;
     Microsoft::WRL::ComPtr<IMFMediaType> selectedType;
 
     for (DWORD typeIndex = 0;; ++typeIndex) {
@@ -112,11 +148,45 @@ HRESULT SelectNativeVideoType(IMFSourceReader* reader, bool preferH264, UINT32& 
             continue;
         }
 
-        if (preferH264 &&
+        UINT32 typeFrameRateNumerator = 0;
+        UINT32 typeFrameRateDenominator = 0;
+        hr = MFGetAttributeRatio(mediaType.Get(), MF_MT_FRAME_RATE, &typeFrameRateNumerator, &typeFrameRateDenominator);
+        if (FAILED(hr) && hr != MF_E_ATTRIBUTENOTFOUND) {
+            LogHResult(L"MFGetAttributeRatio(MF_MT_FRAME_RATE native)", hr);
+        }
+
+        const bool fpsMatches = FrameRateMatchesTarget(typeFrameRateNumerator, typeFrameRateDenominator, targetVideoFps);
+        const bool isH264 =
             major == MFMediaType_Video &&
-            (subtype == MFVideoFormat_H264 || subtype == MFVideoFormat_H264_ES)) {
-            selectedType = mediaType;
-            break;
+            (subtype == MFVideoFormat_H264 || subtype == MFVideoFormat_H264_ES);
+
+        if (targetVideoFps != 0 && fpsMatches && !firstTargetFpsType) {
+            firstTargetFpsType = mediaType;
+        }
+
+        if (isH264) {
+            if (!firstH264Type) {
+                firstH264Type = mediaType;
+            }
+
+            if (targetVideoFps != 0 && fpsMatches) {
+                firstH264TargetFpsType = mediaType;
+                break;
+            }
+        }
+    }
+
+    if (preferH264) {
+        selectedType = firstH264TargetFpsType ? firstH264TargetFpsType : firstH264Type;
+        if (!firstH264Type) {
+            Log::Write(L"No H.264 native UVC media type found. Falling back to first native type.");
+        } else if (targetVideoFps != 0 && !firstH264TargetFpsType) {
+            Log::Write(L"No H.264 native UVC media type matched --video-fps %u. Falling back to first H.264 type.", targetVideoFps);
+        }
+    } else if (targetVideoFps != 0) {
+        selectedType = firstTargetFpsType;
+        if (!selectedType) {
+            Log::Write(L"No native UVC media type matched --video-fps %u. Falling back to first native type.", targetVideoFps);
         }
     }
 
@@ -136,11 +206,21 @@ HRESULT SelectNativeVideoType(IMFSourceReader* reader, bool preferH264, UINT32& 
     }
 
     MFGetAttributeSize(selectedType.Get(), MF_MT_FRAME_SIZE, &width, &height);
-    Log::Write(L"SourceReader selected native video type: %ux%u", width, height);
+    MFGetAttributeRatio(selectedType.Get(), MF_MT_FRAME_RATE, &frameRateNumerator, &frameRateDenominator);
+    Log::Write(L"SourceReader selected native video type: %ux%u fps=%u/%u",
+        width,
+        height,
+        frameRateNumerator,
+        frameRateDenominator);
     return S_OK;
 }
 
-HRESULT ConfigureNv12Output(IMFSourceReader* reader, UINT32& width, UINT32& height)
+HRESULT ConfigureNv12Output(
+    IMFSourceReader* reader,
+    UINT32& width,
+    UINT32& height,
+    UINT32& frameRateNumerator,
+    UINT32& frameRateDenominator)
 {
     Microsoft::WRL::ComPtr<IMFMediaType> outputType;
     RETURN_IF_FAILED_LOG(MFCreateMediaType(&outputType), L"MFCreateMediaType(SourceReader NV12)");
@@ -149,6 +229,12 @@ HRESULT ConfigureNv12Output(IMFSourceReader* reader, UINT32& width, UINT32& heig
 
     if (width != 0 && height != 0) {
         RETURN_IF_FAILED_LOG(MFSetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE, width, height), L"MFSetAttributeSize(SourceReader NV12)");
+    }
+
+    if (frameRateNumerator != 0 && frameRateDenominator != 0) {
+        RETURN_IF_FAILED_LOG(
+            MFSetAttributeRatio(outputType.Get(), MF_MT_FRAME_RATE, frameRateNumerator, frameRateDenominator),
+            L"MFSetAttributeRatio(SourceReader NV12 frame rate)");
     }
 
     RETURN_IF_FAILED_LOG(
@@ -164,6 +250,11 @@ HRESULT ConfigureNv12Output(IMFSourceReader* reader, UINT32& width, UINT32& heig
     if (FAILED(hr)) {
         LogHResult(L"MFGetAttributeSize(SourceReader current NV12)", hr);
         return hr;
+    }
+
+    hr = MFGetAttributeRatio(currentOutputType.Get(), MF_MT_FRAME_RATE, &frameRateNumerator, &frameRateDenominator);
+    if (FAILED(hr) && hr != MF_E_ATTRIBUTENOTFOUND) {
+        LogHResult(L"MFGetAttributeRatio(SourceReader current NV12)", hr);
     }
 
     LogMediaType(L"SourceReader output", 0, currentOutputType.Get());
@@ -318,7 +409,11 @@ HRESULT SourceReaderD3D11Player::InitializeDxgiDeviceManager()
     return S_OK;
 }
 
-HRESULT SourceReaderD3D11Player::EnsureRenderResources(UINT32 frameWidth, UINT32 frameHeight)
+HRESULT SourceReaderD3D11Player::EnsureRenderResources(
+    UINT32 frameWidth,
+    UINT32 frameHeight,
+    UINT32 frameRateNumerator,
+    UINT32 frameRateDenominator)
 {
     RETURN_IF_FAILED_LOG(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
 
@@ -336,7 +431,9 @@ HRESULT SourceReaderD3D11Player::EnsureRenderResources(UINT32 frameWidth, UINT32
         return S_OK;
     }
 
-    RETURN_IF_FAILED_LOG(EnsureVideoProcessor(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureVideoProcessor");
+    RETURN_IF_FAILED_LOG(
+        EnsureVideoProcessor(frameWidth, frameHeight, frameRateNumerator, frameRateDenominator),
+        L"SourceReaderD3D11Player::EnsureVideoProcessor");
     return S_OK;
 }
 
@@ -405,11 +502,17 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
     return S_OK;
 }
 
-HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(UINT32 frameWidth, UINT32 frameHeight)
+HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(
+    UINT32 frameWidth,
+    UINT32 frameHeight,
+    UINT32 frameRateNumerator,
+    UINT32 frameRateDenominator)
 {
     if (frameWidth == 0 || frameHeight == 0 || swapChainWidth_ == 0 || swapChainHeight_ == 0 || !swapChainBackBuffer_) {
         return E_INVALIDARG;
     }
+
+    NormalizeFrameRate(frameRateNumerator, frameRateDenominator);
 
     if (!videoDevice_) {
         RETURN_IF_FAILED_LOG(d3dDevice_.As(&videoDevice_), L"ID3D11Device::QueryInterface(ID3D11VideoDevice)");
@@ -424,6 +527,8 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(UINT32 frameWidth, UINT32 
         !videoProcessor_ ||
         videoProcessorInputWidth_ != frameWidth ||
         videoProcessorInputHeight_ != frameHeight ||
+        videoProcessorInputFrameRateNumerator_ != frameRateNumerator ||
+        videoProcessorInputFrameRateDenominator_ != frameRateDenominator ||
         videoProcessorOutputWidth_ != swapChainWidth_ ||
         videoProcessorOutputHeight_ != swapChainHeight_;
 
@@ -437,12 +542,12 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(UINT32 frameWidth, UINT32 
         contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
         contentDesc.InputWidth = frameWidth;
         contentDesc.InputHeight = frameHeight;
-        contentDesc.InputFrameRate.Numerator = 60;
-        contentDesc.InputFrameRate.Denominator = 1;
+        contentDesc.InputFrameRate.Numerator = frameRateNumerator;
+        contentDesc.InputFrameRate.Denominator = frameRateDenominator;
         contentDesc.OutputWidth = swapChainWidth_;
         contentDesc.OutputHeight = swapChainHeight_;
-        contentDesc.OutputFrameRate.Numerator = 60;
-        contentDesc.OutputFrameRate.Denominator = 1;
+        contentDesc.OutputFrameRate.Numerator = frameRateNumerator;
+        contentDesc.OutputFrameRate.Denominator = frameRateDenominator;
         contentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
 
         RETURN_IF_FAILED_LOG(
@@ -454,12 +559,16 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(UINT32 frameWidth, UINT32 
 
         videoProcessorInputWidth_ = frameWidth;
         videoProcessorInputHeight_ = frameHeight;
+        videoProcessorInputFrameRateNumerator_ = frameRateNumerator;
+        videoProcessorInputFrameRateDenominator_ = frameRateDenominator;
         videoProcessorOutputWidth_ = swapChainWidth_;
         videoProcessorOutputHeight_ = swapChainHeight_;
 
-        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u output=%ux%u",
+        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u fps=%u/%u output=%ux%u",
             frameWidth,
             frameHeight,
+            frameRateNumerator,
+            frameRateDenominator,
             swapChainWidth_,
             swapChainHeight_);
     }
@@ -481,10 +590,18 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(UINT32 frameWidth, UINT32 
     return S_OK;
 }
 
-HRESULT SourceReaderD3D11Player::RenderNv12Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount)
+HRESULT SourceReaderD3D11Player::RenderNv12Sample(
+    IMFSample* sample,
+    UINT32 frameWidth,
+    UINT32 frameHeight,
+    UINT32 frameRateNumerator,
+    UINT32 frameRateDenominator,
+    DWORD& byteCount)
 {
     byteCount = 0;
-    RETURN_IF_FAILED_LOG(EnsureRenderResources(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureRenderResources");
+    RETURN_IF_FAILED_LOG(
+        EnsureRenderResources(frameWidth, frameHeight, frameRateNumerator, frameRateDenominator),
+        L"SourceReaderD3D11Player::EnsureRenderResources");
 
     if (!swapChain_ || !videoProcessor_ || !videoOutputView_) {
         return S_OK;
@@ -655,6 +772,8 @@ void SourceReaderD3D11Player::ResetRenderResources()
     swapChainHeight_ = 0;
     videoProcessorInputWidth_ = 0;
     videoProcessorInputHeight_ = 0;
+    videoProcessorInputFrameRateNumerator_ = 0;
+    videoProcessorInputFrameRateDenominator_ = 0;
     videoProcessorOutputWidth_ = 0;
     videoProcessorOutputHeight_ = 0;
 }
@@ -737,21 +856,42 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
         UINT32 frameWidth = 0;
         UINT32 frameHeight = 0;
-        hr = SelectNativeVideoType(sourceReader.Get(), options.preferH264, frameWidth, frameHeight);
+        UINT32 mediaFrameRateNumerator = 0;
+        UINT32 mediaFrameRateDenominator = 0;
+        hr = SelectNativeVideoType(
+            sourceReader.Get(),
+            options.preferH264,
+            options.targetVideoFps,
+            frameWidth,
+            frameHeight,
+            mediaFrameRateNumerator,
+            mediaFrameRateDenominator);
         if (FAILED(hr)) {
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: selecting native video type");
             break;
         }
 
-        hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight);
+        hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight, mediaFrameRateNumerator, mediaFrameRateDenominator);
         if (FAILED(hr)) {
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: configuring NV12 DXVA decoder output");
             break;
         }
 
+        UINT32 renderFrameRateNumerator = mediaFrameRateNumerator;
+        UINT32 renderFrameRateDenominator = mediaFrameRateDenominator;
+        if (options.targetVideoFps != 0) {
+            renderFrameRateNumerator = options.targetVideoFps;
+            renderFrameRateDenominator = 1;
+            Log::Write(L"SourceReader renderer frame rate metadata forced by --video-fps: %u/1.", options.targetVideoFps);
+        }
+
         width_.store(frameWidth);
         height_.store(frameHeight);
-        Log::Write(L"SourceReader D3D11 NV12/DXVA zero-copy renderer started: %ux%u", frameWidth, frameHeight);
+        Log::Write(L"SourceReader D3D11 NV12/DXVA zero-copy renderer started: %ux%u fps=%u/%u",
+            frameWidth,
+            frameHeight,
+            renderFrameRateNumerator,
+            renderFrameRateDenominator);
 
         DWORD frameCount = 0;
         DWORD statsFrameCount = 0;
@@ -782,9 +922,16 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             }
 
             if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
-                hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight);
+                hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight, mediaFrameRateNumerator, mediaFrameRateDenominator);
                 if (FAILED(hr)) {
                     break;
+                }
+                renderFrameRateNumerator = mediaFrameRateNumerator;
+                renderFrameRateDenominator = mediaFrameRateDenominator;
+                if (options.targetVideoFps != 0) {
+                    renderFrameRateNumerator = options.targetVideoFps;
+                    renderFrameRateDenominator = 1;
+                    Log::Write(L"SourceReader renderer frame rate metadata forced by --video-fps after media type change: %u/1.", options.targetVideoFps);
                 }
                 width_.store(frameWidth);
                 height_.store(frameHeight);
@@ -796,7 +943,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             }
 
             DWORD sampleByteCount = 0;
-            hr = RenderNv12Sample(sample.Get(), frameWidth, frameHeight, sampleByteCount);
+            hr = RenderNv12Sample(sample.Get(), frameWidth, frameHeight, renderFrameRateNumerator, renderFrameRateDenominator, sampleByteCount);
             if (FAILED(hr)) {
                 PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: rendering decoded NV12 DXVA frame");
                 break;

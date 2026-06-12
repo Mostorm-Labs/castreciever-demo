@@ -20,7 +20,7 @@ public:
 private:
     class CaptureEngineCallback;
 
-    HRESULT ConfigureVideoMediaType(bool preferH264);
+    HRESULT ConfigureVideoMediaType(bool preferH264, UINT32 targetVideoFps);
     HRESULT ConfigurePreviewSink(PreviewSinkMode mode);
     HRESULT CreatePreviewMediaType(IMFMediaType** mediaType);
     void LogCurrentVideoTypes();

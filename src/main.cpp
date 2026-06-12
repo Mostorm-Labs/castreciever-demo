@@ -5,6 +5,7 @@
 #include <mfapi.h>
 #include <shellapi.h>
 
+#include <cstdlib>
 #include <string>
 
 namespace {
@@ -16,6 +17,18 @@ namespace {
 #ifndef USB_CAST_RECEIVER_BUILD_TIME_UTC
 #define USB_CAST_RECEIVER_BUILD_TIME_UTC L"unknown"
 #endif
+
+UINT32 ParseVideoFpsValue(const std::wstring& value)
+{
+    wchar_t* end = nullptr;
+    const unsigned long parsed = std::wcstoul(value.c_str(), &end, 10);
+    if (value.empty() || end == value.c_str() || *end != L'\0' || parsed == 0 || parsed > 240) {
+        Log::Write(L"Invalid --video-fps value ignored: %s", value.c_str());
+        return 0;
+    }
+
+    return static_cast<UINT32>(parsed);
+}
 
 AppOptions ParseCommandLine()
 {
@@ -54,6 +67,8 @@ AppOptions ParseCommandLine()
             } else {
                 Log::Write(L"Unknown --video-format value ignored: %s", value.c_str());
             }
+        } else if (arg == L"--video-fps" && i + 1 < argc) {
+            options.targetVideoFps = ParseVideoFpsValue(argv[++i]);
         } else if (arg == L"--preview-sink" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"default") {
@@ -101,11 +116,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         backendName = L"self-test";
     }
 
-    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s', video-backend='%s', video-format='%s', preview-sink='%d'",
+    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s', video-backend='%s', video-format='%s', video-fps=%u, preview-sink='%d'",
         options.uvcMatch.c_str(),
         options.uacMatch.c_str(),
         backendName,
         options.preferH264 ? L"h264" : L"auto",
+        options.targetVideoFps,
         static_cast<int>(options.previewSinkMode));
 
     int exitCode = 0;

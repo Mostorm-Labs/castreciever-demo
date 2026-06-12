@@ -41,6 +41,7 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
     VideoStartOptions videoOptions;
     videoOptions.deviceMatch = options.uvcMatch;
     videoOptions.preferH264 = options.preferH264;
+    videoOptions.targetVideoFps = options.targetVideoFps;
     videoOptions.previewSinkMode = options.previewSinkMode;
 
     HRESULT hr = videoPlayer_->Start(mainWindow_->VideoHwnd(), videoOptions);

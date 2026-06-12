@@ -16,6 +16,7 @@ struct AppOptions {
     std::wstring uacMatch;
     VideoBackend videoBackend = VideoBackend::SourceReader;
     bool preferH264 = true;
+    UINT32 targetVideoFps = 0;
     PreviewSinkMode previewSinkMode = PreviewSinkMode::Default;
 };
 

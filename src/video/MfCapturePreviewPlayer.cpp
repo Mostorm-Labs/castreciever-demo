@@ -37,6 +37,22 @@ bool IsVideoStreamCategory(MF_CAPTURE_ENGINE_STREAM_CATEGORY category)
         category == MF_CAPTURE_ENGINE_STREAM_CATEGORY_VIDEO_CAPTURE;
 }
 
+bool FrameRateMatchesTarget(UINT32 numerator, UINT32 denominator, UINT32 targetFps)
+{
+    if (targetFps == 0) {
+        return true;
+    }
+
+    if (numerator == 0 || denominator == 0) {
+        return false;
+    }
+
+    const double fps = static_cast<double>(numerator) / static_cast<double>(denominator);
+    const double target = static_cast<double>(targetFps);
+    const double delta = fps > target ? fps - target : target - fps;
+    return delta < 0.25;
+}
+
 HRESULT CreateCaptureEngine(Microsoft::WRL::ComPtr<IMFCaptureEngine>& captureEngine)
 {
     Microsoft::WRL::ComPtr<IMFCaptureEngineClassFactory> factory;
@@ -271,7 +287,7 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const VideoStartOptions& o
         return hr;
     }
 
-    LOG_IF_FAILED(ConfigureVideoMediaType(options.preferH264), L"MfCapturePreviewPlayer::ConfigureVideoMediaType");
+    LOG_IF_FAILED(ConfigureVideoMediaType(options.preferH264, options.targetVideoFps), L"MfCapturePreviewPlayer::ConfigureVideoMediaType");
     LogCurrentVideoTypes();
 
     Microsoft::WRL::ComPtr<IMFCaptureSink> sink;
@@ -339,7 +355,7 @@ void MfCapturePreviewPlayer::Resize(UINT width, UINT height)
     Log::Write(L"Video resize: %ux%u", width, height);
 }
 
-HRESULT MfCapturePreviewPlayer::ConfigureVideoMediaType(bool preferH264)
+HRESULT MfCapturePreviewPlayer::ConfigureVideoMediaType(bool preferH264, UINT32 targetVideoFps)
 {
     if (!captureEngine_) {
         return E_UNEXPECTED;
@@ -353,6 +369,9 @@ HRESULT MfCapturePreviewPlayer::ConfigureVideoMediaType(bool preferH264)
 
     bool sawVideoStream = false;
     DWORD firstVideoStreamIndex = 0;
+    Microsoft::WRL::ComPtr<IMFMediaType> firstH264Type;
+    DWORD firstH264StreamIndex = 0;
+    DWORD firstH264TypeIndex = 0;
 
     for (DWORD streamIndex = 0; streamIndex < streamCount; ++streamIndex) {
         MF_CAPTURE_ENGINE_STREAM_CATEGORY category = MF_CAPTURE_ENGINE_STREAM_CATEGORY_UNSUPPORTED;
@@ -406,17 +425,55 @@ HRESULT MfCapturePreviewPlayer::ConfigureVideoMediaType(bool preferH264)
 
             if (major == MFMediaType_Video &&
                 (subtype == MFVideoFormat_H264 || subtype == MFVideoFormat_H264_ES)) {
-                hr = source->SetCurrentDeviceMediaType(streamIndex, mediaType.Get());
-                if (SUCCEEDED(hr)) {
-                    previewSourceStreamIndex_ = streamIndex;
-                    hasPreviewSourceStreamIndex_ = true;
-                    Log::Write(L"Selected H.264 UVC media type on stream %u type %u.", streamIndex, typeIndex);
-                    return S_OK;
+                if (!firstH264Type) {
+                    firstH264Type = mediaType;
+                    firstH264StreamIndex = streamIndex;
+                    firstH264TypeIndex = typeIndex;
                 }
 
-                LogHResult(L"IMFCaptureSource::SetCurrentDeviceMediaType(H.264)", hr);
+                UINT32 frameRateNumerator = 0;
+                UINT32 frameRateDenominator = 0;
+                hr = MFGetAttributeRatio(mediaType.Get(), MF_MT_FRAME_RATE, &frameRateNumerator, &frameRateDenominator);
+                if (FAILED(hr) && hr != MF_E_ATTRIBUTENOTFOUND) {
+                    LogHResult(L"MFGetAttributeRatio(MF_MT_FRAME_RATE Capture H.264)", hr);
+                }
+
+                if (targetVideoFps != 0 && !FrameRateMatchesTarget(frameRateNumerator, frameRateDenominator, targetVideoFps)) {
+                    continue;
+                }
+
+                hr = source->SetCurrentDeviceMediaType(streamIndex, mediaType.Get());
+                if (FAILED(hr)) {
+                    LogHResult(L"IMFCaptureSource::SetCurrentDeviceMediaType(H.264)", hr);
+                    continue;
+                }
+
+                previewSourceStreamIndex_ = streamIndex;
+                hasPreviewSourceStreamIndex_ = true;
+                Log::Write(L"Selected H.264 UVC media type on stream %u type %u fps=%u/%u.",
+                    streamIndex,
+                    typeIndex,
+                    frameRateNumerator,
+                    frameRateDenominator);
+                return S_OK;
             }
         }
+    }
+
+    if (preferH264 && firstH264Type) {
+        if (targetVideoFps != 0) {
+            Log::Write(L"No Capture Engine H.264 media type matched --video-fps %u. Falling back to first H.264 type.", targetVideoFps);
+        }
+
+        const HRESULT hr = source->SetCurrentDeviceMediaType(firstH264StreamIndex, firstH264Type.Get());
+        if (SUCCEEDED(hr)) {
+            previewSourceStreamIndex_ = firstH264StreamIndex;
+            hasPreviewSourceStreamIndex_ = true;
+            Log::Write(L"Selected H.264 UVC media type on stream %u type %u.", firstH264StreamIndex, firstH264TypeIndex);
+            return S_OK;
+        }
+
+        LogHResult(L"IMFCaptureSource::SetCurrentDeviceMediaType(first H.264)", hr);
     }
 
     if (sawVideoStream) {
