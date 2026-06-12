@@ -10,10 +10,9 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <avrt.h>
-#include <d3dcompiler.h>
+#include <d3d10.h>
 
 #include <algorithm>
-#include <cstring>
 
 namespace {
 
@@ -141,101 +140,33 @@ HRESULT SelectNativeVideoType(IMFSourceReader* reader, bool preferH264, UINT32& 
     return S_OK;
 }
 
-HRESULT ConfigureRgb32Output(IMFSourceReader* reader, UINT32& width, UINT32& height)
+HRESULT ConfigureNv12Output(IMFSourceReader* reader, UINT32& width, UINT32& height)
 {
     Microsoft::WRL::ComPtr<IMFMediaType> outputType;
-    RETURN_IF_FAILED_LOG(MFCreateMediaType(&outputType), L"MFCreateMediaType(SourceReader RGB32)");
+    RETURN_IF_FAILED_LOG(MFCreateMediaType(&outputType), L"MFCreateMediaType(SourceReader NV12)");
     RETURN_IF_FAILED_LOG(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video), L"IMFMediaType::SetGUID(MF_MT_MAJOR_TYPE SourceReader)");
-    RETURN_IF_FAILED_LOG(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32), L"IMFMediaType::SetGUID(MF_MT_SUBTYPE RGB32 SourceReader)");
+    RETURN_IF_FAILED_LOG(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12), L"IMFMediaType::SetGUID(MF_MT_SUBTYPE NV12 SourceReader)");
 
     if (width != 0 && height != 0) {
-        RETURN_IF_FAILED_LOG(MFSetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE, width, height), L"MFSetAttributeSize(SourceReader RGB32)");
+        RETURN_IF_FAILED_LOG(MFSetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE, width, height), L"MFSetAttributeSize(SourceReader NV12)");
     }
 
     RETURN_IF_FAILED_LOG(
         reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, outputType.Get()),
-        L"IMFSourceReader::SetCurrentMediaType(RGB32)");
+        L"IMFSourceReader::SetCurrentMediaType(NV12)");
 
     Microsoft::WRL::ComPtr<IMFMediaType> currentOutputType;
     RETURN_IF_FAILED_LOG(
         reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentOutputType),
-        L"IMFSourceReader::GetCurrentMediaType(RGB32)");
+        L"IMFSourceReader::GetCurrentMediaType(NV12)");
 
     HRESULT hr = MFGetAttributeSize(currentOutputType.Get(), MF_MT_FRAME_SIZE, &width, &height);
     if (FAILED(hr)) {
-        LogHResult(L"MFGetAttributeSize(SourceReader current RGB32)", hr);
+        LogHResult(L"MFGetAttributeSize(SourceReader current NV12)", hr);
         return hr;
     }
 
     LogMediaType(L"SourceReader output", 0, currentOutputType.Get());
-    return S_OK;
-}
-
-constexpr char kFullscreenTriangleShader[] = R"(
-Texture2D frameTexture : register(t0);
-SamplerState linearSampler : register(s0);
-
-struct VertexOutput
-{
-    float4 position : SV_POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-VertexOutput VSMain(uint vertexId : SV_VertexID)
-{
-    float2 positions[3] = {
-        float2(-1.0, -1.0),
-        float2(-1.0,  3.0),
-        float2( 3.0, -1.0)
-    };
-
-    float2 uvs[3] = {
-        float2(0.0,  1.0),
-        float2(0.0, -1.0),
-        float2(2.0,  1.0)
-    };
-
-    VertexOutput output;
-    output.position = float4(positions[vertexId], 0.0, 1.0);
-    output.uv = uvs[vertexId];
-    return output;
-}
-
-float4 PSMain(VertexOutput input) : SV_TARGET
-{
-    return frameTexture.Sample(linearSampler, input.uv);
-}
-)";
-
-HRESULT CompileShader(const char* entryPoint, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& blob)
-{
-    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#if defined(_DEBUG)
-    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-    Microsoft::WRL::ComPtr<ID3DBlob> errors;
-    HRESULT hr = D3DCompile(
-        kFullscreenTriangleShader,
-        std::strlen(kFullscreenTriangleShader),
-        nullptr,
-        nullptr,
-        nullptr,
-        entryPoint,
-        target,
-        flags,
-        0,
-        &blob,
-        &errors);
-    if (FAILED(hr)) {
-        if (errors) {
-            OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
-            OutputDebugStringA("\r\n");
-        }
-        LogHResult(L"D3DCompile(SourceReader renderer shader)", hr);
-        return hr;
-    }
-
     return S_OK;
 }
 
@@ -368,11 +299,28 @@ void SourceReaderD3D11Player::Resize(UINT width, UINT height)
     height_.store(height);
 }
 
+HRESULT SourceReaderD3D11Player::InitializeDxgiDeviceManager()
+{
+    RETURN_IF_FAILED_LOG(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
+
+    if (dxgiDeviceManager_) {
+        return S_OK;
+    }
+
+    RETURN_IF_FAILED_LOG(
+        MFCreateDXGIDeviceManager(&dxgiDeviceManagerResetToken_, &dxgiDeviceManager_),
+        L"MFCreateDXGIDeviceManager(SourceReader)");
+    RETURN_IF_FAILED_LOG(
+        dxgiDeviceManager_->ResetDevice(d3dDevice_.Get(), dxgiDeviceManagerResetToken_),
+        L"IMFDXGIDeviceManager::ResetDevice(SourceReader)");
+
+    Log::Write(L"SourceReader D3D11 device manager initialized for DXVA output.");
+    return S_OK;
+}
+
 HRESULT SourceReaderD3D11Player::EnsureRenderResources(UINT32 frameWidth, UINT32 frameHeight)
 {
     RETURN_IF_FAILED_LOG(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
-    RETURN_IF_FAILED_LOG(EnsureShaders(), L"SourceReaderD3D11Player::EnsureShaders");
-    RETURN_IF_FAILED_LOG(EnsureFrameTexture(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureFrameTexture");
 
     RECT client = {};
     if (!GetClientRect(hwndVideo_, &client)) {
@@ -384,45 +332,11 @@ HRESULT SourceReaderD3D11Player::EnsureRenderResources(UINT32 frameWidth, UINT32
     const UINT clientWidth = static_cast<UINT>(std::max<LONG>(0, client.right - client.left));
     const UINT clientHeight = static_cast<UINT>(std::max<LONG>(0, client.bottom - client.top));
     RETURN_IF_FAILED_LOG(EnsureSwapChain(clientWidth, clientHeight), L"SourceReaderD3D11Player::EnsureSwapChain");
-    return S_OK;
-}
-
-HRESULT SourceReaderD3D11Player::EnsureShaders()
-{
-    if (vertexShader_ && pixelShader_ && sampler_) {
+    if (clientWidth == 0 || clientHeight == 0) {
         return S_OK;
     }
 
-    Microsoft::WRL::ComPtr<ID3DBlob> vertexShaderBlob;
-    RETURN_IF_FAILED_LOG(CompileShader("VSMain", "vs_4_0", vertexShaderBlob), L"CompileShader(VSMain)");
-    RETURN_IF_FAILED_LOG(
-        d3dDevice_->CreateVertexShader(
-            vertexShaderBlob->GetBufferPointer(),
-            vertexShaderBlob->GetBufferSize(),
-            nullptr,
-            &vertexShader_),
-        L"ID3D11Device::CreateVertexShader(SourceReader)");
-
-    Microsoft::WRL::ComPtr<ID3DBlob> pixelShaderBlob;
-    RETURN_IF_FAILED_LOG(CompileShader("PSMain", "ps_4_0", pixelShaderBlob), L"CompileShader(PSMain)");
-    RETURN_IF_FAILED_LOG(
-        d3dDevice_->CreatePixelShader(
-            pixelShaderBlob->GetBufferPointer(),
-            pixelShaderBlob->GetBufferSize(),
-            nullptr,
-            &pixelShader_),
-        L"ID3D11Device::CreatePixelShader(SourceReader)");
-
-    D3D11_SAMPLER_DESC samplerDesc = {};
-    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-    RETURN_IF_FAILED_LOG(
-        d3dDevice_->CreateSamplerState(&samplerDesc, &sampler_),
-        L"ID3D11Device::CreateSamplerState(SourceReader)");
-
+    RETURN_IF_FAILED_LOG(EnsureVideoProcessor(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureVideoProcessor");
     return S_OK;
 }
 
@@ -470,9 +384,8 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
         swapChainHeight_ = clientHeight;
         Log::Write(L"SourceReader D3D11 swap chain created: %ux%u", clientWidth, clientHeight);
     } else if (clientWidth != swapChainWidth_ || clientHeight != swapChainHeight_) {
-        ID3D11RenderTargetView* nullRenderTarget = nullptr;
-        d3dContext_->OMSetRenderTargets(1, &nullRenderTarget, nullptr);
-        renderTargetView_.Reset();
+        videoOutputView_.Reset();
+        swapChainBackBuffer_.Reset();
 
         HRESULT hr = swapChain_->ResizeBuffers(0, clientWidth, clientHeight, DXGI_FORMAT_UNKNOWN, 0);
         if (FAILED(hr)) {
@@ -485,153 +398,232 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
         Log::Write(L"SourceReader D3D11 swap chain resized: %ux%u", clientWidth, clientHeight);
     }
 
-    if (!renderTargetView_) {
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
-        RETURN_IF_FAILED_LOG(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)), L"IDXGISwapChain::GetBuffer(SourceReader)");
-        RETURN_IF_FAILED_LOG(
-            d3dDevice_->CreateRenderTargetView(backBuffer.Get(), nullptr, &renderTargetView_),
-            L"ID3D11Device::CreateRenderTargetView(SourceReader)");
+    if (!swapChainBackBuffer_) {
+        RETURN_IF_FAILED_LOG(swapChain_->GetBuffer(0, IID_PPV_ARGS(&swapChainBackBuffer_)), L"IDXGISwapChain::GetBuffer(SourceReader)");
     }
 
     return S_OK;
 }
 
-HRESULT SourceReaderD3D11Player::EnsureFrameTexture(UINT32 frameWidth, UINT32 frameHeight)
+HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(UINT32 frameWidth, UINT32 frameHeight)
 {
-    if (frameWidth == 0 || frameHeight == 0) {
+    if (frameWidth == 0 || frameHeight == 0 || swapChainWidth_ == 0 || swapChainHeight_ == 0 || !swapChainBackBuffer_) {
         return E_INVALIDARG;
     }
 
-    if (frameTexture_ && frameTextureView_ && textureWidth_ == frameWidth && textureHeight_ == frameHeight) {
-        return S_OK;
+    if (!videoDevice_) {
+        RETURN_IF_FAILED_LOG(d3dDevice_.As(&videoDevice_), L"ID3D11Device::QueryInterface(ID3D11VideoDevice)");
     }
 
-    frameTextureView_.Reset();
-    frameTexture_.Reset();
+    if (!videoContext_) {
+        RETURN_IF_FAILED_LOG(d3dContext_.As(&videoContext_), L"ID3D11DeviceContext::QueryInterface(ID3D11VideoContext)");
+    }
 
-    D3D11_TEXTURE2D_DESC textureDesc = {};
-    textureDesc.Width = frameWidth;
-    textureDesc.Height = frameHeight;
-    textureDesc.MipLevels = 1;
-    textureDesc.ArraySize = 1;
-    textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    textureDesc.SampleDesc.Count = 1;
-    textureDesc.Usage = D3D11_USAGE_DYNAMIC;
-    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    const bool needsNewProcessor =
+        !videoProcessorEnumerator_ ||
+        !videoProcessor_ ||
+        videoProcessorInputWidth_ != frameWidth ||
+        videoProcessorInputHeight_ != frameHeight ||
+        videoProcessorOutputWidth_ != swapChainWidth_ ||
+        videoProcessorOutputHeight_ != swapChainHeight_;
 
-    RETURN_IF_FAILED_LOG(
-        d3dDevice_->CreateTexture2D(&textureDesc, nullptr, &frameTexture_),
-        L"ID3D11Device::CreateTexture2D(SourceReader frame)");
-    RETURN_IF_FAILED_LOG(
-        d3dDevice_->CreateShaderResourceView(frameTexture_.Get(), nullptr, &frameTextureView_),
-        L"ID3D11Device::CreateShaderResourceView(SourceReader frame)");
+    if (needsNewProcessor) {
+        videoOutputView_.Reset();
+        videoProcessor_.Reset();
+        videoProcessorEnumerator_.Reset();
+        inputViewCache_.clear();
 
-    textureWidth_ = frameWidth;
-    textureHeight_ = frameHeight;
-    Log::Write(L"SourceReader D3D11 RGB32 upload texture created: %ux%u", frameWidth, frameHeight);
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc = {};
+        contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        contentDesc.InputWidth = frameWidth;
+        contentDesc.InputHeight = frameHeight;
+        contentDesc.InputFrameRate.Numerator = 60;
+        contentDesc.InputFrameRate.Denominator = 1;
+        contentDesc.OutputWidth = swapChainWidth_;
+        contentDesc.OutputHeight = swapChainHeight_;
+        contentDesc.OutputFrameRate.Numerator = 60;
+        contentDesc.OutputFrameRate.Denominator = 1;
+        contentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+        RETURN_IF_FAILED_LOG(
+            videoDevice_->CreateVideoProcessorEnumerator(&contentDesc, &videoProcessorEnumerator_),
+            L"ID3D11VideoDevice::CreateVideoProcessorEnumerator(SourceReader)");
+        RETURN_IF_FAILED_LOG(
+            videoDevice_->CreateVideoProcessor(videoProcessorEnumerator_.Get(), 0, &videoProcessor_),
+            L"ID3D11VideoDevice::CreateVideoProcessor(SourceReader)");
+
+        videoProcessorInputWidth_ = frameWidth;
+        videoProcessorInputHeight_ = frameHeight;
+        videoProcessorOutputWidth_ = swapChainWidth_;
+        videoProcessorOutputHeight_ = swapChainHeight_;
+
+        Log::Write(L"SourceReader D3D11 video processor created: input=%ux%u output=%ux%u",
+            frameWidth,
+            frameHeight,
+            swapChainWidth_,
+            swapChainHeight_);
+    }
+
+    if (!videoOutputView_) {
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = {};
+        outputViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        outputViewDesc.Texture2D.MipSlice = 0;
+
+        RETURN_IF_FAILED_LOG(
+            videoDevice_->CreateVideoProcessorOutputView(
+                swapChainBackBuffer_.Get(),
+                videoProcessorEnumerator_.Get(),
+                &outputViewDesc,
+                &videoOutputView_),
+            L"ID3D11VideoDevice::CreateVideoProcessorOutputView(SourceReader)");
+    }
+
     return S_OK;
 }
 
-HRESULT SourceReaderD3D11Player::RenderRgb32Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount)
+HRESULT SourceReaderD3D11Player::RenderNv12Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount)
 {
     byteCount = 0;
     RETURN_IF_FAILED_LOG(EnsureRenderResources(frameWidth, frameHeight), L"SourceReaderD3D11Player::EnsureRenderResources");
 
-    if (!swapChain_ || !renderTargetView_) {
+    if (!swapChain_ || !videoProcessor_ || !videoOutputView_) {
         return S_OK;
     }
 
-    RETURN_IF_FAILED_LOG(UploadRgb32Sample(sample, frameWidth, frameHeight, byteCount), L"SourceReaderD3D11Player::UploadRgb32Sample");
-    RETURN_IF_FAILED_LOG(DrawFrame(), L"SourceReaderD3D11Player::DrawFrame");
-    return S_OK;
-}
-
-HRESULT SourceReaderD3D11Player::UploadRgb32Sample(IMFSample* sample, UINT32 frameWidth, UINT32 frameHeight, DWORD& byteCount)
-{
-    byteCount = 0;
-    if (sample == nullptr || !frameTexture_) {
+    if (sample == nullptr) {
         return E_INVALIDARG;
     }
 
     Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-    RETURN_IF_FAILED_LOG(sample->ConvertToContiguousBuffer(&buffer), L"IMFSample::ConvertToContiguousBuffer(video)");
-
-    BYTE* data = nullptr;
-    DWORD maxLength = 0;
-    DWORD currentLength = 0;
-    HRESULT hr = buffer->Lock(&data, &maxLength, &currentLength);
+    HRESULT hr = sample->GetBufferByIndex(0, &buffer);
     if (FAILED(hr)) {
-        LogHResult(L"IMFMediaBuffer::Lock(video)", hr);
+        LogHResult(L"IMFSample::GetBufferByIndex(video)", hr);
         return hr;
     }
 
-    const UINT sourcePitch = frameWidth * 4;
-    const unsigned long long requiredBytes = static_cast<unsigned long long>(sourcePitch) * frameHeight;
-    if (currentLength < requiredBytes) {
-        LOG_IF_FAILED(buffer->Unlock(), L"IMFMediaBuffer::Unlock(video after short RGB32 buffer)");
-        Log::Write(L"SourceReader RGB32 sample too small: bytes=%u required=%llu", currentLength, requiredBytes);
-        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-    }
+    LOG_IF_FAILED(buffer->GetCurrentLength(&byteCount), L"IMFMediaBuffer::GetCurrentLength(video)");
 
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    hr = d3dContext_->Map(frameTexture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    Microsoft::WRL::ComPtr<IMFDXGIBuffer> dxgiBuffer;
+    hr = buffer.As(&dxgiBuffer);
     if (FAILED(hr)) {
-        LOG_IF_FAILED(buffer->Unlock(), L"IMFMediaBuffer::Unlock(video after D3D map failure)");
-        LogHResult(L"ID3D11DeviceContext::Map(SourceReader frame texture)", hr);
+        LogHResult(L"IMFMediaBuffer::QueryInterface(IMFDXGIBuffer)", hr);
+        Log::Write(L"SourceReader sample is not a DXGI buffer; DXVA zero-copy output is not active.");
         return hr;
     }
 
-    auto* destination = static_cast<BYTE*>(mapped.pData);
-    for (UINT32 y = 0; y < frameHeight; ++y) {
-        std::memcpy(
-            destination + static_cast<size_t>(mapped.RowPitch) * y,
-            data + static_cast<size_t>(sourcePitch) * y,
-            sourcePitch);
-    }
-    d3dContext_->Unmap(frameTexture_.Get(), 0);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    RETURN_IF_FAILED_LOG(dxgiBuffer->GetResource(IID_PPV_ARGS(&texture)), L"IMFDXGIBuffer::GetResource(ID3D11Texture2D)");
 
-    hr = buffer->Unlock();
-    if (FAILED(hr)) {
-        LogHResult(L"IMFMediaBuffer::Unlock(video)", hr);
-        return hr;
-    }
+    UINT subresourceIndex = 0;
+    RETURN_IF_FAILED_LOG(dxgiBuffer->GetSubresourceIndex(&subresourceIndex), L"IMFDXGIBuffer::GetSubresourceIndex");
 
-    byteCount = currentLength;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> inputView;
+    RETURN_IF_FAILED_LOG(GetNv12InputView(texture.Get(), subresourceIndex, &inputView), L"SourceReaderD3D11Player::GetNv12InputView");
+    RETURN_IF_FAILED_LOG(DrawNv12Frame(inputView.Get(), frameWidth, frameHeight), L"SourceReaderD3D11Player::DrawNv12Frame");
     return S_OK;
 }
 
-HRESULT SourceReaderD3D11Player::DrawFrame()
+HRESULT SourceReaderD3D11Player::GetNv12InputView(
+    ID3D11Texture2D* texture,
+    UINT subresourceIndex,
+    ID3D11VideoProcessorInputView** inputView)
 {
-    if (!swapChain_ || !renderTargetView_ || !frameTextureView_ || !vertexShader_ || !pixelShader_ || !sampler_) {
-        return S_OK;
+    if (texture == nullptr || inputView == nullptr || !videoDevice_ || !videoProcessorEnumerator_) {
+        return E_INVALIDARG;
     }
 
-    const FLOAT clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    d3dContext_->OMSetRenderTargets(1, renderTargetView_.GetAddressOf(), nullptr);
-    d3dContext_->ClearRenderTargetView(renderTargetView_.Get(), clearColor);
+    for (const auto& cached : inputViewCache_) {
+        if (cached.texture.Get() == texture && cached.subresourceIndex == subresourceIndex) {
+            return cached.inputView.CopyTo(inputView);
+        }
+    }
 
-    D3D11_VIEWPORT viewport = {};
-    viewport.TopLeftX = 0.0f;
-    viewport.TopLeftY = 0.0f;
-    viewport.Width = static_cast<FLOAT>(swapChainWidth_);
-    viewport.Height = static_cast<FLOAT>(swapChainHeight_);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-    d3dContext_->RSSetViewports(1, &viewport);
+    D3D11_TEXTURE2D_DESC textureDesc = {};
+    texture->GetDesc(&textureDesc);
+    if (textureDesc.Format != DXGI_FORMAT_NV12) {
+        Log::Write(L"SourceReader DXGI sample texture format is %u, expected NV12 (%u).",
+            static_cast<unsigned int>(textureDesc.Format),
+            static_cast<unsigned int>(DXGI_FORMAT_NV12));
+    }
 
-    d3dContext_->IASetInputLayout(nullptr);
-    d3dContext_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    d3dContext_->VSSetShader(vertexShader_.Get(), nullptr, 0);
-    d3dContext_->PSSetShader(pixelShader_.Get(), nullptr, 0);
-    d3dContext_->PSSetShaderResources(0, 1, frameTextureView_.GetAddressOf());
-    d3dContext_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
-    d3dContext_->Draw(3, 0);
+    const UINT mipLevels = std::max<UINT>(1, textureDesc.MipLevels);
+    const UINT mipSlice = subresourceIndex % mipLevels;
+    const UINT arraySlice = subresourceIndex / mipLevels;
+    if (arraySlice >= textureDesc.ArraySize) {
+        Log::Write(L"Invalid NV12 texture subresource: subresource=%u mipLevels=%u arraySize=%u",
+            subresourceIndex,
+            mipLevels,
+            textureDesc.ArraySize);
+        return E_INVALIDARG;
+    }
 
-    ID3D11ShaderResourceView* nullShaderResource = nullptr;
-    d3dContext_->PSSetShaderResources(0, 1, &nullShaderResource);
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = {};
+    inputViewDesc.FourCC = 0;
+    inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    inputViewDesc.Texture2D.MipSlice = mipSlice;
+    inputViewDesc.Texture2D.ArraySlice = arraySlice;
 
-    HRESULT hr = swapChain_->Present(1, 0);
+    CachedInputView cached;
+    cached.texture = texture;
+    cached.subresourceIndex = subresourceIndex;
+    RETURN_IF_FAILED_LOG(
+        videoDevice_->CreateVideoProcessorInputView(
+            texture,
+            videoProcessorEnumerator_.Get(),
+            &inputViewDesc,
+            &cached.inputView),
+        L"ID3D11VideoDevice::CreateVideoProcessorInputView(SourceReader)");
+
+    Log::Write(L"Cached NV12 DXVA input view: texture=%ux%u format=%u subresource=%u arraySlice=%u",
+        textureDesc.Width,
+        textureDesc.Height,
+        static_cast<unsigned int>(textureDesc.Format),
+        subresourceIndex,
+        arraySlice);
+
+    inputViewCache_.push_back(cached);
+    if (inputViewCache_.size() > 32) {
+        inputViewCache_.erase(inputViewCache_.begin());
+    }
+
+    return inputViewCache_.back().inputView.CopyTo(inputView);
+}
+
+HRESULT SourceReaderD3D11Player::DrawNv12Frame(ID3D11VideoProcessorInputView* inputView, UINT32 frameWidth, UINT32 frameHeight)
+{
+    if (inputView == nullptr || !videoContext_ || !videoProcessor_ || !videoOutputView_ || !swapChain_) {
+        return E_INVALIDARG;
+    }
+
+    RECT sourceRect = {
+        0,
+        0,
+        static_cast<LONG>(frameWidth),
+        static_cast<LONG>(frameHeight),
+    };
+    RECT destinationRect = {
+        0,
+        0,
+        static_cast<LONG>(swapChainWidth_),
+        static_cast<LONG>(swapChainHeight_),
+    };
+
+    videoContext_->VideoProcessorSetOutputTargetRect(videoProcessor_.Get(), TRUE, &destinationRect);
+    videoContext_->VideoProcessorSetStreamFrameFormat(videoProcessor_.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    videoContext_->VideoProcessorSetStreamSourceRect(videoProcessor_.Get(), 0, TRUE, &sourceRect);
+    videoContext_->VideoProcessorSetStreamDestRect(videoProcessor_.Get(), 0, TRUE, &destinationRect);
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+    stream.Enable = TRUE;
+    stream.pInputSurface = inputView;
+
+    HRESULT hr = videoContext_->VideoProcessorBlt(videoProcessor_.Get(), videoOutputView_.Get(), 0, 1, &stream);
+    if (FAILED(hr)) {
+        LogHResult(L"ID3D11VideoContext::VideoProcessorBlt(SourceReader)", hr);
+        return hr;
+    }
+
+    hr = swapChain_->Present(1, 0);
     if (FAILED(hr)) {
         LogHResult(L"IDXGISwapChain::Present(SourceReader)", hr);
         return hr;
@@ -643,27 +635,28 @@ HRESULT SourceReaderD3D11Player::DrawFrame()
 void SourceReaderD3D11Player::ResetRenderResources()
 {
     if (d3dContext_) {
-        ID3D11ShaderResourceView* nullShaderResource = nullptr;
-        ID3D11RenderTargetView* nullRenderTarget = nullptr;
-        d3dContext_->PSSetShaderResources(0, 1, &nullShaderResource);
-        d3dContext_->OMSetRenderTargets(1, &nullRenderTarget, nullptr);
         d3dContext_->ClearState();
         d3dContext_->Flush();
     }
 
-    sampler_.Reset();
-    pixelShader_.Reset();
-    vertexShader_.Reset();
-    frameTextureView_.Reset();
-    frameTexture_.Reset();
-    renderTargetView_.Reset();
+    inputViewCache_.clear();
+    videoOutputView_.Reset();
+    videoProcessor_.Reset();
+    videoProcessorEnumerator_.Reset();
+    videoContext_.Reset();
+    videoDevice_.Reset();
+    swapChainBackBuffer_.Reset();
     swapChain_.Reset();
+    dxgiDeviceManager_.Reset();
     d3dContext_.Reset();
     d3dDevice_.Reset();
+    dxgiDeviceManagerResetToken_ = 0;
     swapChainWidth_ = 0;
     swapChainHeight_ = 0;
-    textureWidth_ = 0;
-    textureHeight_ = 0;
+    videoProcessorInputWidth_ = 0;
+    videoProcessorInputHeight_ = 0;
+    videoProcessorOutputWidth_ = 0;
+    videoProcessorOutputHeight_ = 0;
 }
 
 void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
@@ -707,15 +700,26 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             break;
         }
 
+        hr = InitializeDxgiDeviceManager();
+        if (FAILED(hr)) {
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: D3D11 device manager");
+            break;
+        }
+
         Microsoft::WRL::ComPtr<IMFAttributes> attributes;
-        hr = MFCreateAttributes(&attributes, 3);
+        hr = MFCreateAttributes(&attributes, 4);
         if (FAILED(hr)) {
             LogHResult(L"MFCreateAttributes(SourceReader)", hr);
             break;
         }
 
         LOG_IF_FAILED(attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE), L"Set MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS");
-        LOG_IF_FAILED(attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE), L"Set MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING");
+        LOG_IF_FAILED(attributes->SetUINT32(MF_LOW_LATENCY, TRUE), L"Set MF_LOW_LATENCY");
+        hr = attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, dxgiDeviceManager_.Get());
+        if (FAILED(hr)) {
+            LogHResult(L"Set MF_SOURCE_READER_D3D_MANAGER", hr);
+            break;
+        }
 
         hr = MFCreateSourceReaderFromMediaSource(mediaSource.Get(), attributes.Get(), &sourceReader);
         if (FAILED(hr)) {
@@ -739,15 +743,15 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             break;
         }
 
-        hr = ConfigureRgb32Output(sourceReader.Get(), frameWidth, frameHeight);
+        hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight);
         if (FAILED(hr)) {
-            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: configuring RGB32 decoder output");
+            PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: configuring NV12 DXVA decoder output");
             break;
         }
 
         width_.store(frameWidth);
         height_.store(frameHeight);
-        Log::Write(L"SourceReader D3D11 RGB32 swap-chain renderer started: %ux%u", frameWidth, frameHeight);
+        Log::Write(L"SourceReader D3D11 NV12/DXVA zero-copy renderer started: %ux%u", frameWidth, frameHeight);
 
         DWORD frameCount = 0;
         DWORD statsFrameCount = 0;
@@ -778,7 +782,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             }
 
             if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
-                hr = ConfigureRgb32Output(sourceReader.Get(), frameWidth, frameHeight);
+                hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight);
                 if (FAILED(hr)) {
                     break;
                 }
@@ -792,9 +796,9 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
             }
 
             DWORD sampleByteCount = 0;
-            hr = RenderRgb32Sample(sample.Get(), frameWidth, frameHeight, sampleByteCount);
+            hr = RenderNv12Sample(sample.Get(), frameWidth, frameHeight, sampleByteCount);
             if (FAILED(hr)) {
-                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: rendering decoded RGB32 frame");
+                PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: rendering decoded NV12 DXVA frame");
                 break;
             }
 
@@ -877,6 +881,11 @@ HRESULT SourceReaderD3D11Player::InitializeD3D11()
     if (FAILED(hr)) {
         LogHResult(L"D3D11CreateDevice", hr);
         return hr;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D10Multithread> multithread;
+    if (SUCCEEDED(d3dDevice_.As(&multithread))) {
+        multithread->SetMultithreadProtected(TRUE);
     }
 
     Log::Write(L"D3D11 device created for SourceReader renderer. Feature level=0x%04X", static_cast<unsigned int>(createdLevel));

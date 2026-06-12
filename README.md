@@ -7,7 +7,7 @@ UsbCastReceiver is a Windows native proof-of-concept for a USB cast receiver dev
 Video:
 
 ```text
-UVC H.264 -> Media Foundation Source Reader -> system H.264 decoder -> RGB32 -> D3D11 texture upload -> DXGI swap chain
+UVC H.264 -> Media Foundation Source Reader -> DXVA decoder -> NV12 D3D11 texture -> D3D11 VideoProcessor -> DXGI swap chain
 ```
 
 Audio:
@@ -16,7 +16,7 @@ Audio:
 UAC PCM -> WASAPI capture -> WASAPI render
 ```
 
-The default video path uses Media Foundation Source Reader, asks Windows to decode the UVC H.264 stream to RGB32, uploads each frame into a D3D11 texture, and presents through a DXGI swap chain bound to the child `HWND`. This is the working path for the tested `Wireless transceiver NA20` device. The Capture Engine preview path is still available with `--video-backend capture`, but it is treated as experimental because some UVC driver stacks fail or stay blank even when Source Reader can pull frames.
+The default video path uses Media Foundation Source Reader with an `IMFDXGIDeviceManager`, asks Windows to decode the UVC H.264 stream to NV12 DXVA-backed D3D11 textures, converts/scales through the D3D11 VideoProcessor, and presents through a DXGI swap chain bound to the child `HWND`. This is the working path for the tested `Wireless transceiver NA20` device. The Capture Engine preview path is still available with `--video-backend capture`, but it is treated as experimental because some UVC driver stacks fail or stay blank even when Source Reader can pull frames.
 
 The audio path captures PCM from the selected UAC endpoint and writes it to the default render endpoint. Muting does not stop or reopen the capture device; the relay keeps draining capture buffers and writes silence to render.
 
@@ -58,7 +58,7 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --video-backend capt
 build\Release\UsbCastReceiver.exe --video-backend self-test
 ```
 
-`--video-backend source-reader` is the default and uses Source Reader to decode to RGB32 before presenting frames through the current D3D11 swap-chain renderer. `--video-backend capture` uses Media Foundation Capture Engine preview and is kept as an optional compatibility experiment. `--video-backend self-test` does not open any device; it only paints animated color bars into the video HWND to verify Win32 presentation. `--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets the selected backend choose. `--preview-sink default` is the default Capture Engine mode and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
+`--video-backend source-reader` is the default and uses Source Reader to request NV12 DXVA output before presenting frames through the D3D11 VideoProcessor and swap chain. `--video-backend capture` uses Media Foundation Capture Engine preview and is kept as an optional compatibility experiment. `--video-backend self-test` does not open any device; it only paints animated color bars into the video HWND to verify Win32 presentation. `--video-format h264` is the default and selects an H.264 native UVC type when present. `--video-format auto` leaves the current device media type untouched and lets the selected backend choose. `--preview-sink default` is the default Capture Engine mode and only calls `SetRenderHandle`; `add-stream` and `rgb32` are diagnostic modes for driver stacks that need explicit preview sink configuration.
 
 ## Implemented
 
@@ -67,7 +67,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - ESC restores a maximized window, otherwise closes the application.
 - UVC enumeration through Media Foundation device sources.
 - UAC enumeration through MMDevice API.
-- Source Reader video backend that paints a visible test pattern before frame delivery, then presents decoded RGB32 frames through D3D11.
+- Source Reader video backend that paints a visible test pattern before frame delivery, then presents decoded NV12 DXVA frames through the D3D11 VideoProcessor.
 - Optional Media Foundation Capture Engine preview player.
 - WASAPI PCM capture-to-render relay.
 - Thread-safe mute state that keeps consuming capture data.
@@ -77,7 +77,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 
 - If the UAC capture format differs from the default render mix format, the relay uses the Windows Audio Resampler DSP through Media Foundation. This covers common PCM/float sample-rate and channel-count differences, such as 16 kHz mono capture to 48 kHz stereo render.
 - Some UVC H.264 devices may not preview directly through Capture Engine on every driver stack. Use the default Source Reader backend for those devices.
-- The current Source Reader renderer still receives CPU-visible RGB32 samples and uploads them into a D3D11 texture per frame. The next performance step is DXVA/D3D-backed decode output, preferably NV12 GPU textures, to remove the CPU RGB32 copy/upload path.
+- The Source Reader renderer now requests DXVA-backed NV12 D3D11 surfaces. If a driver or decoder stack returns system-memory samples instead of `IMFDXGIBuffer`, the app logs that zero-copy is not active and fails the path so the issue is visible.
 
 ## Troubleshooting
 
@@ -94,7 +94,7 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 ## Performance Principles
 
 - No Electron, Chromium, or WebView render chain.
-- Keep the current Source Reader D3D11 path allocation-stable; the next renderer step should remove the CPU RGB32 upload from the steady-state performance path.
+- Keep the current Source Reader D3D11 path allocation-stable and avoid per-frame CPU pixel copies.
 - Prefer Windows Media Foundation system H.264 decoding.
 - Use only a few Win32 controls for UI.
 - Avoid layered transparent windows to reduce extra DWM composition cost.
@@ -104,7 +104,7 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 
 ## TODO
 
-- Replace the Source Reader RGB32 texture upload path with DXVA/D3D-backed NV12 decode textures.
+- Add a controlled fallback from NV12/DXVA to RGB32 upload for machines or drivers that cannot provide DXGI-backed decode surfaces.
 - Harden audio resampling with drift handling and glitch metrics.
 - Add audio/video sync and latency handling.
 - Add FPS, dropped-frame, and end-to-end latency statistics.
