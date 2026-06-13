@@ -8,6 +8,7 @@
 #include "audio/IAudioPlayer.h"
 #include "audio/WasapiPcmRelay.h"
 #include "core/MediaCore.h"
+#include "hid/HidMediaExperimentalAdapter.h"
 #include "source/SessionManager.h"
 #include "video/IVideoPlayer.h"
 #include "video/MfCapturePreviewPlayer.h"
@@ -65,6 +66,7 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
     mediaCore_ = std::make_unique<MediaCore>();
     sessionManager_ = std::make_unique<SessionManager>();
     airPlayDiscovery_ = std::make_unique<AirPlayDiscoveryService>();
+    hidMediaAdapter_ = std::make_unique<HidMediaExperimentalAdapter>();
     mainWindow_ = std::make_unique<MainWindow>();
 
     RETURN_IF_FAILED_LOG(
@@ -104,8 +106,11 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
             usbVideoStarted = true;
         }
     } else if (WantsHidExperimental(options)) {
-        sessionManager_->TryBegin(MediaSourceKind::HidExperimental);
-        Log::Write(L"HID experimental source mode selected; no default USB video path started.");
+        hr = StartHidExperimentalSource(options);
+        if (FAILED(hr)) {
+            mainWindow_->Destroy();
+            return hr;
+        }
     } else {
         Log::Write(L"USB disabled by source mode or --no-usb.");
     }
@@ -123,6 +128,50 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
     }
 
     initialized_ = true;
+    return S_OK;
+}
+
+HRESULT App::StartHidExperimentalSource(const AppOptions& options)
+{
+    if (!sessionManager_->TryBegin(MediaSourceKind::HidExperimental, L"AXTP HID")) {
+        return HRESULT_FROM_WIN32(ERROR_BUSY);
+    }
+    if (!mediaCore_->StartSession(MediaSourceKind::HidExperimental)) {
+        sessionManager_->End(MediaSourceKind::HidExperimental);
+        return HRESULT_FROM_WIN32(ERROR_BUSY);
+    }
+
+    SourceStartContext sourceContext;
+    sourceContext.mediaSink = mediaCore_.get();
+    sourceContext.videoHwnd = mainWindow_ ? mainWindow_->VideoHwnd() : nullptr;
+
+    HidRuntimeTransportConfig transportConfig;
+    transportConfig.enabled = options.hidRuntimeTransportEnabled;
+    transportConfig.vendorId = options.hidVendorId;
+    transportConfig.productId = options.hidProductId;
+    transportConfig.serialNumber = options.hidSerialNumber;
+    transportConfig.reportId = options.hidReportId;
+    transportConfig.inputReportSize = options.hidInputReportSize;
+    transportConfig.outputReportSize = options.hidOutputReportSize;
+    transportConfig.maxReportsPerPoll = options.hidMaxReportsPerPoll;
+    transportConfig.pollIntervalMs = options.hidPollIntervalMs;
+    if (transportConfig.enabled && (transportConfig.vendorId == 0 || transportConfig.productId == 0)) {
+        Log::Write(L"HID runtime transport requires both --hid-vid and --hid-pid.");
+        mediaCore_->EndSession(MediaSourceKind::HidExperimental);
+        sessionManager_->End(MediaSourceKind::HidExperimental);
+        return E_INVALIDARG;
+    }
+    hidMediaAdapter_->SetRuntimeTransportConfig(transportConfig);
+
+    const HRESULT hr = hidMediaAdapter_->Start(sourceContext);
+    if (FAILED(hr)) {
+        mediaCore_->EndSession(MediaSourceKind::HidExperimental);
+        sessionManager_->End(MediaSourceKind::HidExperimental);
+        LogHResult(L"HidMediaExperimentalAdapter::Start", hr);
+        return hr;
+    }
+
+    Log::Write(L"HID experimental source mode selected; AXTP Standard Frame/STREAM parser is active.");
     return S_OK;
 }
 
@@ -162,6 +211,10 @@ int App::Run()
 
 void App::Shutdown()
 {
+    if (hidMediaAdapter_) {
+        hidMediaAdapter_->Stop();
+    }
+
     if (airPlayDiscovery_) {
         airPlayDiscovery_->Stop();
     }
@@ -180,6 +233,9 @@ void App::Shutdown()
 
     if (sessionManager_) {
         sessionManager_->ForceIdle();
+    }
+    if (mediaCore_) {
+        mediaCore_->EndSession(MediaSourceKind::Unknown);
     }
 
     initialized_ = false;

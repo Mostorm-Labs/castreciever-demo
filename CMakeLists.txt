@@ -35,6 +35,8 @@ add_executable(UsbCastReceiver WIN32
     src/airplay/AirPlayDeviceId.cpp
     src/airplay/AirPlayDiscoveryService.cpp
     src/airplay/AirPlaySourceAdapter.cpp
+    src/hid/AxtpHidMediaProtocol.cpp
+    src/hid/AxtpRuntimeHidAdapter.cpp
     src/hid/HidMediaExperimentalAdapter.cpp
     src/device/UvcDeviceEnumerator.cpp
     src/device/UacDeviceEnumerator.cpp
@@ -46,6 +48,28 @@ add_executable(UsbCastReceiver WIN32
 )
 
 target_compile_features(UsbCastReceiver PRIVATE cxx_std_17)
+
+set(AXTP_CPP_RUNTIME_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/axtp-cpp-runtime"
+    CACHE PATH "Path to the AXTP C++ runtime repository")
+
+if(NOT EXISTS "${AXTP_CPP_RUNTIME_ROOT}/core/CMakeLists.txt")
+    message(FATAL_ERROR
+        "AXTP C++ runtime was not found. "
+        "Set AXTP_CPP_RUNTIME_ROOT to the axtp-cpp-runtime repository directory.")
+endif()
+
+set(AXTP_CORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(AXTP_BUILD_JSON_RPC OFF CACHE BOOL "" FORCE)
+set(AXTP_BUILD_OPTIONAL_TRANSPORTS ON CACHE BOOL "" FORCE)
+add_subdirectory(
+    "${AXTP_CPP_RUNTIME_ROOT}/core"
+    "${CMAKE_CURRENT_BINARY_DIR}/axtp-cpp-runtime-core"
+    EXCLUDE_FROM_ALL)
+
+if(NOT TARGET axtp_transport_hidapi)
+    message(FATAL_ERROR "AXTP C++ runtime did not provide axtp_transport_hidapi.")
+endif()
 
 target_compile_definitions(UsbCastReceiver PRIVATE
     UNICODE
@@ -82,4 +106,5 @@ target_link_libraries(UsbCastReceiver PRIVATE
     iphlpapi
     ws2_32
     bcrypt
+    axtp_transport_hidapi
 )

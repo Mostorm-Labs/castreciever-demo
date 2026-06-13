@@ -31,6 +31,23 @@ UINT32 ParseVideoFpsValue(const std::wstring& value)
     return static_cast<UINT32>(parsed);
 }
 
+bool ParseUnsignedValue(const std::wstring& value, unsigned long maxValue, unsigned long& parsed)
+{
+    wchar_t* end = nullptr;
+    parsed = std::wcstoul(value.c_str(), &end, 0);
+    return !value.empty() && end != value.c_str() && *end == L'\0' && parsed <= maxValue;
+}
+
+std::string NarrowAscii(const std::wstring& value)
+{
+    std::string result;
+    result.reserve(value.size());
+    for (wchar_t ch : value) {
+        result.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : '?');
+    }
+    return result;
+}
+
 const wchar_t* SourceModeName(SourceMode sourceMode)
 {
     switch (sourceMode) {
@@ -135,6 +152,67 @@ AppOptions ParseCommandLine()
             }
         } else if (arg == L"--video-fps" && i + 1 < argc) {
             options.targetVideoFps = ParseVideoFpsValue(argv[++i]);
+        } else if (arg == L"--hid-vid" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 0xFFFF, parsed)) {
+                options.hidVendorId = static_cast<uint16_t>(parsed);
+                options.hidRuntimeTransportEnabled = true;
+            } else {
+                Log::Write(L"Invalid --hid-vid value ignored.");
+            }
+        } else if (arg == L"--hid-pid" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 0xFFFF, parsed)) {
+                options.hidProductId = static_cast<uint16_t>(parsed);
+                options.hidRuntimeTransportEnabled = true;
+            } else {
+                Log::Write(L"Invalid --hid-pid value ignored.");
+            }
+        } else if (arg == L"--hid-serial" && i + 1 < argc) {
+            options.hidSerialNumber = NarrowAscii(argv[++i]);
+        } else if (arg == L"--hid-report-id" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 0xFF, parsed)) {
+                options.hidReportId = static_cast<uint8_t>(parsed);
+            } else {
+                Log::Write(L"Invalid --hid-report-id value ignored.");
+            }
+        } else if (arg == L"--hid-report-size" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 65535, parsed) && parsed >= 2) {
+                options.hidInputReportSize = static_cast<size_t>(parsed);
+                options.hidOutputReportSize = static_cast<size_t>(parsed);
+            } else {
+                Log::Write(L"Invalid --hid-report-size value ignored.");
+            }
+        } else if (arg == L"--hid-input-report-size" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 65535, parsed) && parsed >= 2) {
+                options.hidInputReportSize = static_cast<size_t>(parsed);
+            } else {
+                Log::Write(L"Invalid --hid-input-report-size value ignored.");
+            }
+        } else if (arg == L"--hid-output-report-size" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 65535, parsed) && parsed >= 2) {
+                options.hidOutputReportSize = static_cast<size_t>(parsed);
+            } else {
+                Log::Write(L"Invalid --hid-output-report-size value ignored.");
+            }
+        } else if (arg == L"--hid-max-reports-per-poll" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 1024, parsed) && parsed > 0) {
+                options.hidMaxReportsPerPoll = static_cast<size_t>(parsed);
+            } else {
+                Log::Write(L"Invalid --hid-max-reports-per-poll value ignored.");
+            }
+        } else if (arg == L"--hid-poll-ms" && i + 1 < argc) {
+            unsigned long parsed = 0;
+            if (ParseUnsignedValue(argv[++i], 1000, parsed) && parsed > 0) {
+                options.hidPollIntervalMs = static_cast<uint32_t>(parsed);
+            } else {
+                Log::Write(L"Invalid --hid-poll-ms value ignored.");
+            }
         } else if (arg == L"--preview-sink" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"default") {
@@ -189,7 +267,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         backendName = L"self-test";
     }
 
-    Log::Write(L"Starting UsbCastReceiver. source='%s', UVC match='%s', UAC match='%s', airplay-name='%s', airplay-pin=%s, no-airplay=%s, no-usb=%s, video-backend='%s', video-format='%s', video-fps=%u, preview-sink='%d'",
+    Log::Write(L"Starting UsbCastReceiver. source='%s', UVC match='%s', UAC match='%s', airplay-name='%s', airplay-pin=%s, no-airplay=%s, no-usb=%s, video-backend='%s', video-format='%s', video-fps=%u, preview-sink='%d', hid-runtime=%s, hid-vid=0x%04X, hid-pid=0x%04X, hid-report-id=%u, hid-input-report=%zu, hid-output-report=%zu, hid-max-reports-per-poll=%zu, hid-poll-ms=%u",
         SourceModeName(options.sourceMode),
         options.uvcMatch.c_str(),
         options.uacMatch.c_str(),
@@ -200,7 +278,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         backendName,
         options.preferH264 ? L"h264" : L"auto",
         options.targetVideoFps,
-        static_cast<int>(options.previewSinkMode));
+        static_cast<int>(options.previewSinkMode),
+        options.hidRuntimeTransportEnabled ? L"true" : L"false",
+        options.hidVendorId,
+        options.hidProductId,
+        options.hidReportId,
+        options.hidInputReportSize,
+        options.hidOutputReportSize,
+        options.hidMaxReportsPerPoll,
+        options.hidPollIntervalMs);
 
     int exitCode = 0;
     {

@@ -40,6 +40,12 @@ enum class VideoFramePayloadKind {
     SelfTest,
 };
 
+enum class AudioFramePayloadKind {
+    None,
+    Pcm,
+    EncodedAac,
+};
+
 struct VideoFormat {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -53,6 +59,7 @@ struct MediaVideoFrame {
     VideoFormat format;
     int64_t ptsQpcNs = 0;
     int64_t durationNs = 0;
+    uint64_t mediaTimestampUs = 0;
     uint64_t sequence = 0;
     bool keyFrame = false;
     std::vector<uint8_t> encodedBytes;
@@ -62,11 +69,15 @@ struct MediaVideoFrame {
 
 struct MediaAudioFrame {
     MediaSourceKind source = MediaSourceKind::Unknown;
+    AudioFramePayloadKind payloadKind = AudioFramePayloadKind::None;
     int64_t ptsQpcNs = 0;
+    int64_t durationNs = 0;
+    uint64_t mediaTimestampUs = 0;
     uint32_t sampleRate = 0;
     uint16_t channels = 0;
     uint16_t bitsPerSample = 0;
     std::vector<uint8_t> pcmBytes;
+    std::vector<uint8_t> encodedBytes;
 };
 
 struct MediaEvent {
@@ -74,4 +85,3 @@ struct MediaEvent {
     MediaEventType type = MediaEventType::Error;
     std::wstring message;
 };
-

@@ -22,15 +22,27 @@ AirPlay migration scaffold:
 AirPlay DNS-SD -> RAOP/AirPlay protocol adapter -> MediaCore -> MF/D3D11/WASAPI renderers
 ```
 
+HID AXTP media scaffold:
+
+```text
+HID report bytes -> AXTP Standard Frame reassembly -> STREAM parser -> MediaCore
+```
+
 The default video path uses Media Foundation Source Reader with an `IMFDXGIDeviceManager`, asks Windows to decode the UVC H.264 stream to NV12 DXVA-backed D3D11 textures, converts/scales through the D3D11 VideoProcessor, and presents through a DXGI swap chain bound to the child `HWND`. This is the working path for the tested `Wireless transceiver NA20` device. The Capture Engine preview path is still available with `--video-backend capture`, but it is treated as experimental because some UVC driver stacks fail or stay blank even when Source Reader can pull frames.
 
 The audio path captures PCM from the selected UAC endpoint and writes it to the default render endpoint. Muting does not stop or reopen the capture device; the relay keeps draining capture buffers and writes silence to render.
 
 The AirPlay migration is being landed incrementally. The current build has the shared media-core primitives and Bonjour/DNS-SD service registration for `_airplay._tcp` and `_raop._tcp`. The RAOP/HTTP/FairPlay server, AirPlay H.264 mirror decoder, and AirPlay audio path are not wired to playback yet.
 
+The HID media path follows the AXTP Standard Framed profile used by the sibling `axtp` documents. HID transport, hidapi integration, Standard Frame parsing, L1 frame reassembly, and STREAM header parsing come from the `Mostorm-Labs/axtp-cpp-runtime` submodule. This app keeps only the product-side media adapter that maps `StreamPayload.cursor` values as `timestampUs` into the shared `MediaCore` clock and parses the draft audio/video chunk envelopes.
+
 ## Build
 
-Use Windows 10/11 x64 with Visual Studio 2022:
+Use Windows 10/11 x64 with Visual Studio 2022. The AXTP C++ runtime is a required submodule dependency and supplies the HID transport, hidapi dependency, and AXTP protocol parser:
+
+```bat
+git submodule update --init --recursive
+```
 
 ```bat
 cmake -S . -B build -A x64
@@ -62,9 +74,19 @@ build\Release\UsbCastReceiver.exe --source auto
 build\Release\UsbCastReceiver.exe --source usb-only
 build\Release\UsbCastReceiver.exe --source airplay-only --airplay-name "Conference Display"
 build\Release\UsbCastReceiver.exe --source hid-experimental
+build\Release\UsbCastReceiver.exe --source hid-experimental --hid-vid 0x1234 --hid-pid 0x5678 --hid-report-size 64
 ```
 
-`--source auto` is the default and starts the current USB path plus AirPlay DNS-SD discovery when Bonjour is installed. `--source usb-only` keeps the legacy USB-only behavior. `--source airplay-only` skips USB startup and only starts AirPlay discovery scaffolding. `--source hid-experimental` is reserved for HID media fragmentation tests and is not a product path. `--no-airplay`, `--no-usb`, `--airplay-name`, and `--airplay-pin` are also supported. If `dnssd.dll` is missing, AirPlay discovery is disabled and USB can still run.
+`--source auto` is the default and starts the current USB path plus AirPlay DNS-SD discovery when Bonjour is installed. `--source usb-only` keeps the legacy USB-only behavior. `--source airplay-only` skips USB startup and only starts AirPlay discovery scaffolding. `--source hid-experimental` starts the AXTP HID media adapter for parser/flow-control integration tests and is not a default product path. `--no-airplay`, `--no-usb`, `--airplay-name`, and `--airplay-pin` are also supported. If `dnssd.dll` is missing, AirPlay discovery is disabled and USB can still run.
+
+HID AXTP media expectations:
+
+- HID reports are opened and polled through cpp-runtime `axtp_transport_hidapi`; this target owns the hidapi dependency and exposes the required include/link settings.
+- HID reports carry AXTP Standard Frame bytes. cpp-runtime strips the configured report ID and feeds AXTP bytes into its protocol parser.
+- STREAM payloads use the fixed 16-byte header `streamId:uint32`, `seqId:uint32`, `cursor:uint64`, then opaque `data`; the 16-byte header is parsed by cpp-runtime before this app sees the media chunk.
+- The experimental defaults are `streamId=1` for H.264 Annex-B video and `streamId=2` for AAC audio, with `cursor=timestampUs`.
+- Video `data` may be the provisional big-endian `VideoChunkHeaderV1` field layout from the draft followed by H.264 bytes; otherwise it is treated as one complete H.264 access unit. Missing video chunks reset frame reassembly and should be followed by a future `video.requestKeyFrame` control action.
+- Audio `data` may be the provisional big-endian `AudioChunkHeaderV1` field layout from the draft followed by AAC bytes; otherwise it is treated as one complete AAC chunk. Missing audio chunks are dropped locally without retransmission. The formal chunk-envelope binary layout is still owned by AXTP adoption/generated output.
 
 Video diagnostics:
 
@@ -94,7 +116,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - Unified media-core primitives for timestamp mapping, a 3-frame latest-frame video queue, late-frame dropping, future-frame rebasing, and media stats.
 - Source/session abstractions for USB, AirPlay, and HID media integration.
 - AirPlay DNS-SD discovery service with dynamic `dnssd.dll` loading, `_airplay._tcp` and `_raop._tcp` TXT records, v1 H.264 mirror/audio feature policy, persistent device id fallback, and Bonjour-missing degradation.
-- HID experimental report reassembly scaffold with sequence/fragment validation and 100 ms partial-frame timeout.
+- HID experimental AXTP Standard Frame/STREAM adapter for H.264 Annex-B video chunks and AAC audio chunks, including sequence gap detection, 100 ms partial video-frame timeout, timestamp mapping, and encoded media submission into `MediaCore`.
 - Thread-safe mute state that keeps consuming capture data.
 - OutputDebugStringW logging for device discovery, formats, and HRESULT failures.
 
@@ -104,6 +126,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - Some UVC H.264 devices may not preview directly through Capture Engine on every driver stack. Use the default Source Reader backend for those devices.
 - The Source Reader renderer now requests DXVA-backed NV12 D3D11 surfaces. If a driver or decoder stack returns system-memory samples instead of `IMFDXGIBuffer`, the app logs that zero-copy is not active and fails the path so the issue is visible.
 - AirPlay discovery is present, but AirPlay playback is not complete in this build. RAOP/HTTP/FairPlay, mirror H.264 decode through Media Foundation, AirPlay audio RTP, and A/V sync still need to be migrated before iPhone/macOS mirroring will render.
+- HID AXTP media parsing is present, but it currently lands encoded H.264/AAC in `MediaCore`; shared H.264/AAC decode/render plumbing is still part of the broader media-core migration.
 
 ## Troubleshooting
 
