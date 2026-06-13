@@ -16,9 +16,17 @@ Audio:
 UAC PCM -> WASAPI capture -> WASAPI render
 ```
 
+AirPlay migration scaffold:
+
+```text
+AirPlay DNS-SD -> RAOP/AirPlay protocol adapter -> MediaCore -> MF/D3D11/WASAPI renderers
+```
+
 The default video path uses Media Foundation Source Reader with an `IMFDXGIDeviceManager`, asks Windows to decode the UVC H.264 stream to NV12 DXVA-backed D3D11 textures, converts/scales through the D3D11 VideoProcessor, and presents through a DXGI swap chain bound to the child `HWND`. This is the working path for the tested `Wireless transceiver NA20` device. The Capture Engine preview path is still available with `--video-backend capture`, but it is treated as experimental because some UVC driver stacks fail or stay blank even when Source Reader can pull frames.
 
 The audio path captures PCM from the selected UAC endpoint and writes it to the default render endpoint. Muting does not stop or reopen the capture device; the relay keeps draining capture buffers and writes silence to render.
+
+The AirPlay migration is being landed incrementally. The current build has the shared media-core primitives and Bonjour/DNS-SD service registration for `_airplay._tcp` and `_raop._tcp`. The RAOP/HTTP/FairPlay server, AirPlay H.264 mirror decoder, and AirPlay audio path are not wired to playback yet.
 
 ## Build
 
@@ -47,6 +55,17 @@ build\Release\UsbCastReceiver.exe --uvc-match "camera name" --uac-match "audio n
 
 `--uvc-match` is matched case-insensitively against the UVC friendly name and symbolic link. `--uac-match` is matched case-insensitively against the UAC friendly name and device id. If a match argument is omitted or empty, the first active endpoint of that type is selected.
 
+Source selection:
+
+```bat
+build\Release\UsbCastReceiver.exe --source auto
+build\Release\UsbCastReceiver.exe --source usb-only
+build\Release\UsbCastReceiver.exe --source airplay-only --airplay-name "Conference Display"
+build\Release\UsbCastReceiver.exe --source hid-experimental
+```
+
+`--source auto` is the default and starts the current USB path plus AirPlay DNS-SD discovery when Bonjour is installed. `--source usb-only` keeps the legacy USB-only behavior. `--source airplay-only` skips USB startup and only starts AirPlay discovery scaffolding. `--source hid-experimental` is reserved for HID media fragmentation tests and is not a product path. `--no-airplay`, `--no-usb`, `--airplay-name`, and `--airplay-pin` are also supported. If `dnssd.dll` is missing, AirPlay discovery is disabled and USB can still run.
+
 Video diagnostics:
 
 ```bat
@@ -72,6 +91,10 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - Source Reader video backend that paints a visible test pattern before frame delivery, then presents decoded NV12 DXVA frames through the D3D11 VideoProcessor.
 - Optional Media Foundation Capture Engine preview player.
 - WASAPI PCM capture-to-render relay.
+- Unified media-core primitives for timestamp mapping, a 3-frame latest-frame video queue, late-frame dropping, future-frame rebasing, and media stats.
+- Source/session abstractions for USB, AirPlay, and HID media integration.
+- AirPlay DNS-SD discovery service with dynamic `dnssd.dll` loading, `_airplay._tcp` and `_raop._tcp` TXT records, v1 H.264 mirror/audio feature policy, persistent device id fallback, and Bonjour-missing degradation.
+- HID experimental report reassembly scaffold with sequence/fragment validation and 100 ms partial-frame timeout.
 - Thread-safe mute state that keeps consuming capture data.
 - OutputDebugStringW logging for device discovery, formats, and HRESULT failures.
 
@@ -80,6 +103,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - If the UAC capture format differs from the default render mix format, the relay uses the Windows Audio Resampler DSP through Media Foundation. This covers common PCM/float sample-rate and channel-count differences, such as 16 kHz mono capture to 48 kHz stereo render.
 - Some UVC H.264 devices may not preview directly through Capture Engine on every driver stack. Use the default Source Reader backend for those devices.
 - The Source Reader renderer now requests DXVA-backed NV12 D3D11 surfaces. If a driver or decoder stack returns system-memory samples instead of `IMFDXGIBuffer`, the app logs that zero-copy is not active and fails the path so the issue is visible.
+- AirPlay discovery is present, but AirPlay playback is not complete in this build. RAOP/HTTP/FairPlay, mirror H.264 decode through Media Foundation, AirPlay audio RTP, and A/V sync still need to be migrated before iPhone/macOS mirroring will render.
 
 ## Troubleshooting
 
@@ -109,6 +133,9 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 ## TODO
 
 - Add a controlled fallback from NV12/DXVA to RGB32 upload for machines or drivers that cannot provide DXGI-backed decode surfaces.
+- Wire the UxPlay RAOP/HTTP/FairPlay protocol layer into `AirPlaySourceAdapter`.
+- Add `MfH264Decoder` for AirPlay Annex-B H.264 and connect decoded D3D11 NV12 frames into `MediaCore`.
+- Split current Source Reader and WASAPI relay into USB source adapters plus shared D3D11/WASAPI renderers.
 - Harden audio resampling with drift handling and glitch metrics.
 - Add audio/video sync and latency handling.
 - Add FPS, dropped-frame, and end-to-end latency statistics.

@@ -2,14 +2,44 @@
 
 #include "HResult.h"
 #include "MainWindow.h"
+#include "airplay/AirPlayDeviceId.h"
+#include "airplay/AirPlayDiscoveryService.h"
+#include "airplay/AirPlayFeatures.h"
 #include "audio/IAudioPlayer.h"
 #include "audio/WasapiPcmRelay.h"
+#include "core/MediaCore.h"
+#include "source/SessionManager.h"
 #include "video/IVideoPlayer.h"
 #include "video/MfCapturePreviewPlayer.h"
 #include "video/SelfTestVideoPlayer.h"
 #include "video/SourceReaderD3D11Player.h"
 
 #include <memory>
+
+namespace {
+
+bool WantsUsb(const AppOptions& options)
+{
+    if (options.noUsb) {
+        return false;
+    }
+    return options.sourceMode == SourceMode::Auto || options.sourceMode == SourceMode::UsbOnly;
+}
+
+bool WantsAirPlay(const AppOptions& options)
+{
+    if (options.noAirPlay) {
+        return false;
+    }
+    return options.sourceMode == SourceMode::Auto || options.sourceMode == SourceMode::AirPlayOnly;
+}
+
+bool WantsHidExperimental(const AppOptions& options)
+{
+    return options.sourceMode == SourceMode::HidExperimental;
+}
+
+} // namespace
 
 App::App() = default;
 
@@ -32,11 +62,24 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
         videoPlayer_ = std::make_unique<MfCapturePreviewPlayer>();
     }
     audioPlayer_ = std::make_unique<WasapiPcmRelay>();
+    mediaCore_ = std::make_unique<MediaCore>();
+    sessionManager_ = std::make_unique<SessionManager>();
+    airPlayDiscovery_ = std::make_unique<AirPlayDiscoveryService>();
     mainWindow_ = std::make_unique<MainWindow>();
 
     RETURN_IF_FAILED_LOG(
         mainWindow_->Create(instance, showCommand, videoPlayer_.get(), audioPlayer_.get()),
         L"MainWindow::Create");
+
+    if (WantsAirPlay(options)) {
+        HRESULT discoveryHr = StartAirPlayDiscovery(options);
+        if (FAILED(discoveryHr)) {
+            LogHResult(L"App::StartAirPlayDiscovery", discoveryHr);
+            Log::Write(L"AirPlay discovery disabled; continuing with the remaining enabled sources.");
+        }
+    } else {
+        Log::Write(L"AirPlay disabled by source mode or --no-airplay.");
+    }
 
     VideoStartOptions videoOptions;
     videoOptions.deviceMatch = options.uvcMatch;
@@ -44,14 +87,32 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
     videoOptions.targetVideoFps = options.targetVideoFps;
     videoOptions.previewSinkMode = options.previewSinkMode;
 
-    HRESULT hr = videoPlayer_->Start(mainWindow_->VideoHwnd(), videoOptions);
-    if (FAILED(hr)) {
-        LogHResult(L"IVideoPlayer::Start", hr);
-        mainWindow_->Destroy();
-        return hr;
+    HRESULT hr = S_OK;
+    bool usbVideoStarted = false;
+    if (WantsUsb(options)) {
+        sessionManager_->TryBegin(MediaSourceKind::Usb);
+        hr = videoPlayer_->Start(mainWindow_->VideoHwnd(), videoOptions);
+        if (FAILED(hr)) {
+            LogHResult(L"IVideoPlayer::Start", hr);
+            sessionManager_->End(MediaSourceKind::Usb);
+            if (options.sourceMode == SourceMode::UsbOnly || !WantsAirPlay(options)) {
+                mainWindow_->Destroy();
+                return hr;
+            }
+            Log::Write(L"USB video startup failed in auto mode; keeping receiver window alive for AirPlay.");
+        } else {
+            usbVideoStarted = true;
+        }
+    } else if (WantsHidExperimental(options)) {
+        sessionManager_->TryBegin(MediaSourceKind::HidExperimental);
+        Log::Write(L"HID experimental source mode selected; no default USB video path started.");
+    } else {
+        Log::Write(L"USB disabled by source mode or --no-usb.");
     }
 
-    if (options.videoBackend == VideoBackend::SelfTest) {
+    if (!usbVideoStarted) {
+        Log::Write(L"USB audio startup skipped because USB video is not active.");
+    } else if (options.videoBackend == VideoBackend::SelfTest) {
         Log::Write(L"Self-test video backend selected; skipping audio startup.");
     } else {
         hr = audioPlayer_->Start(options.uacMatch);
@@ -63,6 +124,29 @@ HRESULT App::Initialize(HINSTANCE instance, int showCommand, const AppOptions& o
 
     initialized_ = true;
     return S_OK;
+}
+
+HRESULT App::StartAirPlayDiscovery(const AppOptions& options)
+{
+    AirPlayDeviceIdentity identity = ResolveAirPlayDeviceIdentity();
+    const std::string deviceId = FormatAirPlayDeviceId(identity.deviceId);
+    Log::Write(
+        L"AirPlay device id resolved from %s: %S",
+        identity.fromNetworkAdapter ? L"network adapter" : L"persistent random fallback",
+        deviceId.c_str());
+
+    AirPlayDiscoveryOptions discoveryOptions;
+    discoveryOptions.name = options.airplayName.empty() ? L"UsbCastReceiver" : options.airplayName;
+    discoveryOptions.deviceId = identity.deviceId;
+    discoveryOptions.features = AirPlayFeatureSet::DefaultMirrorH264V1(true);
+    discoveryOptions.pinMode = options.airplayPin ? AirPlayPinMode::OnscreenPin : AirPlayPinMode::None;
+    discoveryOptions.publicKeyHex = ResolvePersistentDiscoveryPublicKeyHex();
+
+    HRESULT hr = airPlayDiscovery_->Start(discoveryOptions);
+    if (SUCCEEDED(hr)) {
+        Log::Write(L"AirPlay DNS-SD discovery is active. RAOP protocol server migration is not enabled in this build yet.");
+    }
+    return hr;
 }
 
 int App::Run()
@@ -78,6 +162,10 @@ int App::Run()
 
 void App::Shutdown()
 {
+    if (airPlayDiscovery_) {
+        airPlayDiscovery_->Stop();
+    }
+
     if (audioPlayer_) {
         audioPlayer_->Stop();
     }
@@ -88,6 +176,10 @@ void App::Shutdown()
 
     if (mainWindow_) {
         mainWindow_->Destroy();
+    }
+
+    if (sessionManager_) {
+        sessionManager_->ForceIdle();
     }
 
     initialized_ = false;

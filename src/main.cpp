@@ -31,6 +31,22 @@ UINT32 ParseVideoFpsValue(const std::wstring& value)
     return static_cast<UINT32>(parsed);
 }
 
+const wchar_t* SourceModeName(SourceMode sourceMode)
+{
+    switch (sourceMode) {
+    case SourceMode::Auto:
+        return L"auto";
+    case SourceMode::UsbOnly:
+        return L"usb-only";
+    case SourceMode::AirPlayOnly:
+        return L"airplay-only";
+    case SourceMode::HidExperimental:
+        return L"hid-experimental";
+    default:
+        return L"unknown";
+    }
+}
+
 void EnableDpiAwareness()
 {
     if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
@@ -76,6 +92,27 @@ AppOptions ParseCommandLine()
             options.uvcMatch = argv[++i];
         } else if (arg == L"--uac-match" && i + 1 < argc) {
             options.uacMatch = argv[++i];
+        } else if (arg == L"--source" && i + 1 < argc) {
+            const std::wstring value = argv[++i];
+            if (value == L"auto") {
+                options.sourceMode = SourceMode::Auto;
+            } else if (value == L"usb-only") {
+                options.sourceMode = SourceMode::UsbOnly;
+            } else if (value == L"airplay-only") {
+                options.sourceMode = SourceMode::AirPlayOnly;
+            } else if (value == L"hid-experimental") {
+                options.sourceMode = SourceMode::HidExperimental;
+            } else {
+                Log::Write(L"Unknown --source value ignored: %s", value.c_str());
+            }
+        } else if (arg == L"--airplay-name" && i + 1 < argc) {
+            options.airplayName = argv[++i];
+        } else if (arg == L"--airplay-pin") {
+            options.airplayPin = true;
+        } else if (arg == L"--no-airplay") {
+            options.noAirPlay = true;
+        } else if (arg == L"--no-usb") {
+            options.noUsb = true;
         } else if (arg == L"--video-backend" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"capture") {
@@ -152,9 +189,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         backendName = L"self-test";
     }
 
-    Log::Write(L"Starting UsbCastReceiver. UVC match='%s', UAC match='%s', video-backend='%s', video-format='%s', video-fps=%u, preview-sink='%d'",
+    Log::Write(L"Starting UsbCastReceiver. source='%s', UVC match='%s', UAC match='%s', airplay-name='%s', airplay-pin=%s, no-airplay=%s, no-usb=%s, video-backend='%s', video-format='%s', video-fps=%u, preview-sink='%d'",
+        SourceModeName(options.sourceMode),
         options.uvcMatch.c_str(),
         options.uacMatch.c_str(),
+        options.airplayName.c_str(),
+        options.airplayPin ? L"true" : L"false",
+        options.noAirPlay ? L"true" : L"false",
+        options.noUsb ? L"true" : L"false",
         backendName,
         options.preferH264 ? L"h264" : L"auto",
         options.targetVideoFps,

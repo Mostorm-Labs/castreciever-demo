@@ -25,6 +25,17 @@ add_executable(UsbCastReceiver WIN32
     src/Log.cpp
     src/App.cpp
     src/MainWindow.cpp
+    src/core/ClockMapper.cpp
+    src/core/FrameQueue.cpp
+    src/core/FlowController.cpp
+    src/core/MediaCore.cpp
+    src/source/SessionManager.cpp
+    src/source/UsbUvcSourceAdapter.cpp
+    src/airplay/AirPlayFeatures.cpp
+    src/airplay/AirPlayDeviceId.cpp
+    src/airplay/AirPlayDiscoveryService.cpp
+    src/airplay/AirPlaySourceAdapter.cpp
+    src/hid/HidMediaExperimentalAdapter.cpp
     src/device/UvcDeviceEnumerator.cpp
     src/device/UacDeviceEnumerator.cpp
     src/video/MfCapturePreviewPlayer.cpp
@@ -68,4 +79,7 @@ target_link_libraries(UsbCastReceiver PRIVATE
     mmdevapi
     propsys
     shell32
+    iphlpapi
+    ws2_32
+    bcrypt
 )
