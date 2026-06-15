@@ -125,15 +125,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     Log::Initialize();
     SetUnhandledExceptionFilter(Log::UnhandledExceptionFilter);
     std::set_terminate(Log::TerminateHandler);
+    Log::Checkpoint(L"wWinMain entered. instance=0x%p showCommand=%d", instance, showCommand);
+    Log::Write(L"Command line: %s", GetCommandLineW());
+
+    Log::Checkpoint(L"EnableDpiAwareness");
     EnableDpiAwareness();
 
+    Log::Checkpoint(L"CoInitializeEx(COINIT_MULTITHREADED)");
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHResult(L"CoInitializeEx", hr);
         Log::Shutdown();
         return static_cast<int>(hr);
     }
+    Log::Write(L"CoInitializeEx succeeded.");
 
+    Log::Checkpoint(L"MFStartup");
     hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
         LogHResult(L"MFStartup", hr);
@@ -141,7 +148,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         Log::Shutdown();
         return static_cast<int>(hr);
     }
+    Log::Write(L"MFStartup succeeded. MF_VERSION=0x%08X", static_cast<unsigned int>(MF_VERSION));
 
+    Log::Checkpoint(L"ParseCommandLine");
     const AppOptions options = ParseCommandLine();
     Log::Write(L"UsbCastReceiver build git='%s' built='%s'", USB_CAST_RECEIVER_GIT_SHA, USB_CAST_RECEIVER_BUILD_TIME_UTC);
 
@@ -163,18 +172,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     int exitCode = 0;
     {
         App app;
+        Log::Checkpoint(L"App::Initialize");
         hr = app.Initialize(instance, showCommand, options);
         if (SUCCEEDED(hr)) {
+            Log::Checkpoint(L"App::Run message loop");
             exitCode = app.Run();
+            Log::Write(L"Message loop exited. exitCode=%d", exitCode);
         } else {
             LogHResult(L"App::Initialize", hr);
             exitCode = static_cast<int>(hr);
         }
+        Log::Checkpoint(L"App::Shutdown");
         app.Shutdown();
     }
 
+    Log::Checkpoint(L"MFShutdown");
     LOG_IF_FAILED(MFShutdown(), L"MFShutdown");
+    Log::Checkpoint(L"CoUninitialize");
     CoUninitialize();
+    Log::Write(L"Process exiting. exitCode=%d", exitCode);
     Log::Shutdown();
     return exitCode;
 }

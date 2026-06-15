@@ -241,9 +241,11 @@ HRESULT RegisterOverlayClass(HINSTANCE instance)
 
 HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
 {
+    Log::Checkpoint(L"OverlayControls::Create begin parent=0x%p", parent);
     parent_ = parent;
 
     RETURN_IF_FAILED_LOG(RegisterOverlayClass(instance), L"RegisterOverlayClass");
+    Log::Checkpoint(L"CreateWindowExW(overlay controls)");
 
     hwnd_ = CreateWindowExW(
         WS_EX_LAYERED,
@@ -263,9 +265,12 @@ HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
         LogHResult(L"CreateWindowExW(overlay controls)", hr);
         return hr;
     }
+    Log::Write(L"Overlay controls window handle created: hwnd=0x%p parent=0x%p", hwnd_, parent_);
 
     if (!SetLayeredWindowAttributes(hwnd_, kTransparentColor, 0, LWA_COLORKEY)) {
         LogHResult(L"SetLayeredWindowAttributes(overlay controls)", HResultFromLastError());
+    } else {
+        Log::Write(L"Overlay controls color-key transparency enabled.");
     }
 
     return S_OK;
@@ -285,6 +290,19 @@ void OverlayControls::Layout(const RECT& client)
     const int height = std::min(desiredHeight, std::max(0, clientHeight));
     const int x = std::max(0, clientWidth - width - kOverlayRightMargin);
     const int y = std::max(0, (clientHeight - height) / 2);
+
+    static UINT loggedLayoutCount = 0;
+    if (loggedLayoutCount < 8) {
+        ++loggedLayoutCount;
+        Log::Write(L"OverlayControls::Layout #%u: parentClient=%dx%d overlay=(%d,%d %dx%d)",
+            loggedLayoutCount,
+            clientWidth,
+            clientHeight,
+            x,
+            y,
+            width,
+            height);
+    }
 
     MoveWindow(hwnd_, x, y, width, height, TRUE);
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -337,6 +355,17 @@ LRESULT OverlayControls::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, L
     case WM_PAINT: {
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(hwnd, &paint);
+        static bool firstPaintLogged = false;
+        if (!firstPaintLogged) {
+            firstPaintLogged = true;
+            Log::Write(L"Overlay controls first WM_PAINT: hwnd=0x%p hdc=0x%p rcPaint=(%ld,%ld)-(%ld,%ld)",
+                hwnd,
+                dc,
+                paint.rcPaint.left,
+                paint.rcPaint.top,
+                paint.rcPaint.right,
+                paint.rcPaint.bottom);
+        }
         Paint(dc);
         EndPaint(hwnd, &paint);
         return 0;

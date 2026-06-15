@@ -15,6 +15,8 @@ namespace {
 std::mutex g_logMutex;
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
 std::wstring g_logFilePath;
+std::wstring g_lastCheckpoint;
+thread_local std::wstring g_threadCheckpoint;
 std::atomic_bool g_logInitialized { false };
 
 bool DirectoryExists(const std::wstring& path)
@@ -65,17 +67,6 @@ std::wstring ExecutableDirectory()
     return DirectoryName(path);
 }
 
-std::wstring LocalAppDataDirectory()
-{
-    wchar_t path[MAX_PATH] = {};
-    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", path, ARRAYSIZE(path));
-    if (length == 0 || length >= ARRAYSIZE(path)) {
-        return {};
-    }
-
-    return path;
-}
-
 std::wstring TempDirectory()
 {
     wchar_t path[MAX_PATH] = {};
@@ -114,19 +105,14 @@ std::wstring BuildLogFileName()
 std::wstring BuildPreferredLogPath()
 {
     const std::wstring fileName = BuildLogFileName();
-    const std::wstring localAppData = LocalAppDataDirectory();
-    if (!localAppData.empty()) {
-        return localAppData + L"\\UsbCastReceiver\\logs\\" + fileName;
-    }
-
     const std::wstring exeDir = ExecutableDirectory();
     if (!exeDir.empty()) {
-        return exeDir + L"\\logs\\" + fileName;
+        return exeDir + L"\\" + fileName;
     }
 
     const std::wstring tempDir = TempDirectory();
     if (!tempDir.empty()) {
-        return tempDir + L"\\UsbCastReceiver-" + fileName;
+        return tempDir + L"\\" + fileName;
     }
 
     return fileName;
@@ -155,12 +141,6 @@ HANDLE OpenLogFile(std::wstring& path)
         }
 
         if (attempt == 0) {
-            const std::wstring exeDir = ExecutableDirectory();
-            if (!exeDir.empty()) {
-                path = exeDir + L"\\logs\\" + BuildLogFileName();
-                continue;
-            }
-        } else if (attempt == 1) {
             const std::wstring tempDir = TempDirectory();
             if (!tempDir.empty()) {
                 path = tempDir + L"\\" + BuildLogFileName();
@@ -242,6 +222,17 @@ void WriteRaw(const wchar_t* format, va_list args)
     WriteLineLocked(line);
 }
 
+std::wstring LastCheckpoint()
+{
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    return g_lastCheckpoint;
+}
+
+std::wstring LastThreadCheckpoint()
+{
+    return g_threadCheckpoint;
+}
+
 } // namespace
 
 namespace Log {
@@ -284,6 +275,27 @@ std::wstring FilePath()
     return g_logFilePath;
 }
 
+void Checkpoint(const wchar_t* format, ...)
+{
+    if (!g_logInitialized.load()) {
+        Initialize();
+    }
+
+    wchar_t message[2048] = {};
+    va_list args;
+    va_start(args, format);
+    StringCchVPrintfW(message, ARRAYSIZE(message), format, args);
+    va_end(args);
+
+    g_threadCheckpoint = message;
+    {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        g_lastCheckpoint = message;
+    }
+
+    Write(L"Checkpoint: %s", message);
+}
+
 void Write(const wchar_t* format, ...)
 {
     if (!g_logInitialized.load()) {
@@ -298,6 +310,16 @@ void Write(const wchar_t* format, ...)
 
 LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionPointers)
 {
+    const std::wstring threadCheckpoint = LastThreadCheckpoint();
+    if (!threadCheckpoint.empty()) {
+        Write(L"Last checkpoint on crashing thread: %s", threadCheckpoint.c_str());
+    }
+
+    const std::wstring checkpoint = LastCheckpoint();
+    if (!checkpoint.empty()) {
+        Write(L"Last checkpoint in process: %s", checkpoint.c_str());
+    }
+
     if (exceptionPointers != nullptr && exceptionPointers->ExceptionRecord != nullptr) {
         Write(
             L"Unhandled exception: code=0x%08X flags=0x%08X address=0x%p",
@@ -314,6 +336,16 @@ LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionPointers)
 
 void TerminateHandler()
 {
+    const std::wstring threadCheckpoint = LastThreadCheckpoint();
+    if (!threadCheckpoint.empty()) {
+        Write(L"Last checkpoint on terminating thread: %s", threadCheckpoint.c_str());
+    }
+
+    const std::wstring checkpoint = LastCheckpoint();
+    if (!checkpoint.empty()) {
+        Write(L"Last checkpoint in process: %s", checkpoint.c_str());
+    }
+
     Write(L"std::terminate called.");
     Shutdown();
     std::abort();

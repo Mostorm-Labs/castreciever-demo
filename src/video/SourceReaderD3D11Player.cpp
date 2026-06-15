@@ -433,18 +433,27 @@ HRESULT ReadCurrentOutputInfo(
 void PaintDiagnosticPattern(HWND hwnd, const wchar_t* message)
 {
     if (hwnd == nullptr) {
+        Log::Write(L"PaintDiagnosticPattern skipped because hwnd is null. message='%s'", message);
         return;
     }
 
     RECT client = {};
     if (!GetClientRect(hwnd, &client)) {
+        LogHResult(L"GetClientRect(PaintDiagnosticPattern)", HResultFromLastError());
         return;
     }
 
     HDC dc = GetDC(hwnd);
     if (dc == nullptr) {
+        LogHResult(L"GetDC(PaintDiagnosticPattern)", HResultFromLastError());
         return;
     }
+    Log::Write(L"PaintDiagnosticPattern: hwnd=0x%p hdc=0x%p client=%ldx%ld message='%s'",
+        hwnd,
+        dc,
+        client.right - client.left,
+        client.bottom - client.top,
+        message);
 
     const int width = client.right - client.left;
     const int height = client.bottom - client.top;
@@ -533,20 +542,30 @@ HRESULT SourceReaderD3D11Player::Start(HWND hwndVideo, const VideoStartOptions& 
     }
 
     hwndVideo_ = hwndVideo;
-    Log::Write(L"SourceReader backend selected. Device match='%s'", options.deviceMatch.c_str());
+    Log::Checkpoint(L"SourceReaderD3D11Player::Start hwndVideo=0x%p", hwndVideo_);
+    Log::Write(L"SourceReader backend selected. Device match='%s' preferH264=%d targetVideoFps=%u",
+        options.deviceMatch.c_str(),
+        options.preferH264 ? 1 : 0,
+        options.targetVideoFps);
     PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader backend starting...");
 
+    Log::Checkpoint(L"SourceReaderD3D11Player::InitializeD3D11 before worker");
     LOG_IF_FAILED(InitializeD3D11(), L"SourceReaderD3D11Player::InitializeD3D11");
 
+    Log::Checkpoint(L"SourceReaderD3D11Player starting worker thread");
     worker_ = std::thread(&SourceReaderD3D11Player::WorkerThread, this, options);
+    Log::Write(L"SourceReader worker thread created.");
     return S_OK;
 }
 
 void SourceReaderD3D11Player::Stop()
 {
+    Log::Checkpoint(L"SourceReaderD3D11Player::Stop");
     running_.store(false);
     if (worker_.joinable()) {
+        Log::Write(L"Joining SourceReader worker thread.");
         worker_.join();
+        Log::Write(L"SourceReader worker thread joined.");
     }
 
     ResetRenderResources();
@@ -567,9 +586,11 @@ HRESULT SourceReaderD3D11Player::InitializeDxgiDeviceManager()
         return S_OK;
     }
 
+    Log::Checkpoint(L"MFCreateDXGIDeviceManager(SourceReader)");
     RETURN_IF_FAILED_LOG(
         MFCreateDXGIDeviceManager(&dxgiDeviceManagerResetToken_, &dxgiDeviceManager_),
         L"MFCreateDXGIDeviceManager(SourceReader)");
+    Log::Checkpoint(L"IMFDXGIDeviceManager::ResetDevice(SourceReader)");
     RETURN_IF_FAILED_LOG(
         dxgiDeviceManager_->ResetDevice(d3dDevice_.Get(), dxgiDeviceManagerResetToken_),
         L"IMFDXGIDeviceManager::ResetDevice(SourceReader)");
@@ -595,6 +616,20 @@ HRESULT SourceReaderD3D11Player::EnsureRenderResources(
 
     const UINT clientWidth = static_cast<UINT>(std::max<LONG>(0, client.right - client.left));
     const UINT clientHeight = static_cast<UINT>(std::max<LONG>(0, client.bottom - client.top));
+    static UINT loggedEnsureCount = 0;
+    if (loggedEnsureCount < 8) {
+        ++loggedEnsureCount;
+        Log::Write(L"EnsureRenderResources #%u: frame=%ux%u fps=%u/%u client=%ux%u hwndVideo=0x%p",
+            loggedEnsureCount,
+            frameWidth,
+            frameHeight,
+            frameRateNumerator,
+            frameRateDenominator,
+            clientWidth,
+            clientHeight,
+            hwndVideo_);
+    }
+
     RETURN_IF_FAILED_LOG(EnsureSwapChain(clientWidth, clientHeight), L"SourceReaderD3D11Player::EnsureSwapChain");
     if (clientWidth == 0 || clientHeight == 0) {
         return S_OK;
@@ -613,6 +648,7 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
     }
 
     if (!swapChain_) {
+        Log::Checkpoint(L"SourceReader creating DXGI swap chain %ux%u hwndVideo=0x%p", clientWidth, clientHeight, hwndVideo_);
         Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
         RETURN_IF_FAILED_LOG(d3dDevice_.As(&dxgiDevice), L"ID3D11Device::QueryInterface(IDXGIDevice)");
 
@@ -667,13 +703,16 @@ HRESULT SourceReaderD3D11Player::EnsureSwapChain(UINT clientWidth, UINT clientHe
     }
 
     if (!swapChainBackBuffer_) {
+        Log::Checkpoint(L"IDXGISwapChain::GetBuffer(SourceReader)");
         RETURN_IF_FAILED_LOG(swapChain_->GetBuffer(0, IID_PPV_ARGS(&swapChainBackBuffer_)), L"IDXGISwapChain::GetBuffer(SourceReader)");
     }
 
     if (!swapChainRenderTargetView_) {
+        Log::Checkpoint(L"ID3D11Device::CreateRenderTargetView(SourceReader)");
         RETURN_IF_FAILED_LOG(
             d3dDevice_->CreateRenderTargetView(swapChainBackBuffer_.Get(), nullptr, &swapChainRenderTargetView_),
             L"ID3D11Device::CreateRenderTargetView(SourceReader)");
+        Log::Write(L"SourceReader swap chain render target view created.");
     }
 
     return S_OK;
@@ -710,6 +749,11 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(
         videoProcessorOutputHeight_ != swapChainHeight_;
 
     if (needsNewProcessor) {
+        Log::Checkpoint(L"SourceReader creating D3D11 video processor frame=%ux%u output=%ux%u",
+            frameWidth,
+            frameHeight,
+            swapChainWidth_,
+            swapChainHeight_);
         videoOutputView_.Reset();
         videoProcessor_.Reset();
         videoProcessorEnumerator_.Reset();
@@ -757,6 +801,7 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(
     }
 
     if (!videoOutputView_) {
+        Log::Checkpoint(L"ID3D11VideoDevice::CreateVideoProcessorOutputView(SourceReader)");
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = {};
         outputViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         outputViewDesc.Texture2D.MipSlice = 0;
@@ -768,6 +813,7 @@ HRESULT SourceReaderD3D11Player::EnsureVideoProcessor(
                 &outputViewDesc,
                 &videoOutputView_),
             L"ID3D11VideoDevice::CreateVideoProcessorOutputView(SourceReader)");
+        Log::Write(L"SourceReader video processor output view created.");
     }
 
     return S_OK;
@@ -795,6 +841,11 @@ HRESULT SourceReaderD3D11Player::RenderNv12Sample(
     }
 
     Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    static bool firstSampleLogged = false;
+    if (!firstSampleLogged) {
+        firstSampleLogged = true;
+        Log::Checkpoint(L"SourceReader first sample GetBufferByIndex");
+    }
     HRESULT hr = sample->GetBufferByIndex(0, &buffer);
     if (FAILED(hr)) {
         LogHResult(L"IMFSample::GetBufferByIndex(video)", hr);
@@ -939,6 +990,17 @@ HRESULT SourceReaderD3D11Player::DrawNv12Frame(ID3D11VideoProcessorInputView* in
         return hr;
     }
 
+    static bool firstPresentLogged = false;
+    if (!firstPresentLogged) {
+        firstPresentLogged = true;
+        Log::Checkpoint(L"SourceReader first frame presented");
+        Log::Write(L"SourceReader first Present succeeded. source=%ux%u dest swapChain=%ux%u",
+            frameWidth,
+            frameHeight,
+            swapChainWidth_,
+            swapChainHeight_);
+    }
+
     return S_OK;
 }
 
@@ -975,6 +1037,7 @@ void SourceReaderD3D11Player::ResetRenderResources()
 
 void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 {
+    Log::Checkpoint(L"SourceReader worker thread entered");
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHResult(L"CoInitializeEx(SourceReader thread)", hr);
@@ -982,14 +1045,19 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         running_.store(false);
         return;
     }
+    Log::Write(L"SourceReader worker COM initialized.");
 
     DWORD mmcssTaskIndex = 0;
     HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Playback", &mmcssTaskIndex);
     if (mmcssHandle == nullptr) {
         LogHResult(L"AvSetMmThreadCharacteristicsW(SourceReader Playback)", HResultFromLastError());
+    } else {
+        Log::Write(L"SourceReader worker joined MMCSS Playback task. handle=0x%p taskIndex=%lu", mmcssHandle, mmcssTaskIndex);
     }
     if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)) {
         LogHResult(L"SetThreadPriority(SourceReader)", HResultFromLastError());
+    } else {
+        Log::Write(L"SourceReader worker priority set to THREAD_PRIORITY_ABOVE_NORMAL.");
     }
 
     PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader opening UVC device...");
@@ -1000,20 +1068,27 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
     do {
         UvcDeviceEnumerator enumerator;
         UvcDeviceInfo selectedDevice;
+        Log::Checkpoint(L"UvcDeviceEnumerator::FindBestMatch(SourceReader)");
         hr = enumerator.FindBestMatch(options.deviceMatch, selectedDevice);
         if (FAILED(hr)) {
             LogHResult(L"UvcDeviceEnumerator::FindBestMatch(SourceReader)", hr);
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: UVC device not found");
             break;
         }
+        Log::Write(L"SourceReader selected UVC device. name='%s' link='%s'",
+            selectedDevice.friendlyName.c_str(),
+            selectedDevice.symbolicLink.c_str());
 
+        Log::Checkpoint(L"IMFActivate::ActivateObject(IMFMediaSource) opening UVC media source");
         hr = selectedDevice.activate->ActivateObject(IID_PPV_ARGS(&mediaSource));
         if (FAILED(hr)) {
             LogHResult(L"IMFActivate::ActivateObject(IMFMediaSource)", hr);
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: ActivateObject(IMFMediaSource)");
             break;
         }
+        Log::Write(L"UVC media source activated. IMFMediaSource=0x%p", mediaSource.Get());
 
+        Log::Checkpoint(L"InitializeDxgiDeviceManager(SourceReader)");
         hr = InitializeDxgiDeviceManager();
         if (FAILED(hr)) {
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: D3D11 device manager");
@@ -1021,6 +1096,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         }
 
         Microsoft::WRL::ComPtr<IMFAttributes> attributes;
+        Log::Checkpoint(L"MFCreateAttributes(SourceReader)");
         hr = MFCreateAttributes(&attributes, 4);
         if (FAILED(hr)) {
             LogHResult(L"MFCreateAttributes(SourceReader)", hr);
@@ -1029,30 +1105,36 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
 
         LOG_IF_FAILED(attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE), L"Set MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS");
         LOG_IF_FAILED(attributes->SetUINT32(MF_LOW_LATENCY, TRUE), L"Set MF_LOW_LATENCY");
+        Log::Write(L"SourceReader attributes configured: hardwareTransforms=1 lowLatency=1 d3dManager=0x%p", dxgiDeviceManager_.Get());
         hr = attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, dxgiDeviceManager_.Get());
         if (FAILED(hr)) {
             LogHResult(L"Set MF_SOURCE_READER_D3D_MANAGER", hr);
             break;
         }
 
+        Log::Checkpoint(L"MFCreateSourceReaderFromMediaSource");
         hr = MFCreateSourceReaderFromMediaSource(mediaSource.Get(), attributes.Get(), &sourceReader);
         if (FAILED(hr)) {
             LogHResult(L"MFCreateSourceReaderFromMediaSource", hr);
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: MFCreateSourceReaderFromMediaSource");
             break;
         }
+        Log::Write(L"SourceReader created. IMFSourceReader=0x%p", sourceReader.Get());
 
+        Log::Checkpoint(L"IMFSourceReader::SetStreamSelection");
         LOG_IF_FAILED(sourceReader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE), L"IMFSourceReader::SetStreamSelection(all false)");
         hr = sourceReader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
         if (FAILED(hr)) {
             LogHResult(L"IMFSourceReader::SetStreamSelection(video true)", hr);
             break;
         }
+        Log::Write(L"SourceReader video stream selected.");
 
         UINT32 frameWidth = 0;
         UINT32 frameHeight = 0;
         UINT32 mediaFrameRateNumerator = 0;
         UINT32 mediaFrameRateDenominator = 0;
+        Log::Checkpoint(L"SelectNativeVideoType(SourceReader)");
         hr = SelectNativeVideoType(
             sourceReader.Get(),
             options.preferH264,
@@ -1069,6 +1151,7 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         UINT32 preferredVisibleWidth = frameWidth;
         UINT32 preferredVisibleHeight = frameHeight;
 
+        Log::Checkpoint(L"ConfigureNv12Output(SourceReader)");
         hr = ConfigureNv12Output(sourceReader.Get(), frameWidth, frameHeight, mediaFrameRateNumerator, mediaFrameRateDenominator);
         if (FAILED(hr)) {
             PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: configuring NV12 DXVA decoder output");
@@ -1116,6 +1199,8 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
         LONGLONG nextRenderTimestamp = 0;
         PostVideoStats(hwndVideo_, 0.0, 0);
 
+        Log::Checkpoint(L"SourceReader entering ReadSample loop");
+        bool firstReadSampleLogged = false;
         while (running_.load()) {
             DWORD streamIndex = 0;
             DWORD flags = 0;
@@ -1133,6 +1218,15 @@ void SourceReaderD3D11Player::WorkerThread(VideoStartOptions options)
                 LogHResult(L"IMFSourceReader::ReadSample(video)", hr);
                 PaintDiagnosticPatternOnVideoAndParent(hwndVideo_, L"SourceReader failed: ReadSample(video)");
                 break;
+            }
+            if (!firstReadSampleLogged) {
+                firstReadSampleLogged = true;
+                Log::Checkpoint(L"SourceReader first ReadSample returned");
+                Log::Write(L"SourceReader first ReadSample: stream=%u flags=0x%08X timestamp=%lld sample=0x%p",
+                    streamIndex,
+                    flags,
+                    timestamp,
+                    sample.Get());
             }
 
             if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
@@ -1258,6 +1352,7 @@ HRESULT SourceReaderD3D11Player::InitializeD3D11()
         return S_OK;
     }
 
+    Log::Checkpoint(L"D3D11CreateDevice(SourceReader)");
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 #if defined(_DEBUG)
     flags |= D3D11_CREATE_DEVICE_DEBUG;

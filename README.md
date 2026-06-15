@@ -64,7 +64,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 ## Implemented
 
 - Win32 main window with a child video window.
-- Right-side icon control rail for mute/unmute, stop, and maximize/restore.
+- Floating right-side icon controls for mute/unmute, stop, and maximize/restore.
 - On-screen render FPS overlay in the upper-left corner for quick smoothness diagnostics.
 - ESC restores a maximized window, otherwise closes the application.
 - UVC enumeration through Media Foundation device sources.
@@ -73,7 +73,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 - Optional Media Foundation Capture Engine preview player.
 - WASAPI PCM capture-to-render relay.
 - Thread-safe mute state that keeps consuming capture data.
-- OutputDebugStringW logging for device discovery, formats, and HRESULT failures.
+- OutputDebugStringW plus local UTF-8 file logging for device discovery, startup checkpoints, handles, formats, and HRESULT failures.
 
 ## Current Limits
 
@@ -83,7 +83,7 @@ build\Release\UsbCastReceiver.exe --video-backend self-test
 
 ## Troubleshooting
 
-- The app writes a UTF-8 diagnostic log on startup. The preferred location is `%LOCALAPPDATA%\UsbCastReceiver\logs\UsbCastReceiver-YYYYMMDD-HHMMSS-PID.log`; if that cannot be opened, it falls back to a `logs` directory beside the executable and then the system temp directory. The first log line also prints the chosen path to Visual Studio Output. If the process exits because of an unhandled exception or `std::terminate`, the last log lines should include that failure.
+- The app writes a UTF-8 diagnostic log on startup beside `UsbCastReceiver.exe`: `UsbCastReceiver-YYYYMMDD-HHMMSS-PID.log`. If that cannot be opened, it falls back to the system temp directory. The first log line also prints the chosen path to Visual Studio Output. Startup checkpoints include window handles, device activation, Source Reader/Capture Engine setup, D3D11 swap-chain creation, first paint, first sample, and first present. If the process exits because of an unhandled exception or `std::terminate`, the last log lines include the last checkpoint reached before the failure.
 - For sharp 1080p output, the app enables Per-Monitor DPI awareness and asks the main window to match the native decoded video size. Check the log for `SourceReader D3D11 video processor created: input=1920x1080 ... output=1920x1080 scale=1:1`. If the log says `scale=resample`, the current window or monitor size is still forcing scaling.
 - `CoCreateInstance(CLSID_MFCaptureEngine) failed: 0x80004002 (No such interface supported)` means the app could not obtain `IMFCaptureEngine` before opening the UVC device. The code now first tries `IMFCaptureEngineClassFactory::CreateInstance`, then falls back to direct `CLSID_MFCaptureEngine` creation and logs both HRESULT values.
 - If Capture Engine creation still fails, verify the machine is a full Windows 10/11 desktop install with Media Foundation components available. Windows N/KN editions may require the Media Feature Pack.
@@ -101,7 +101,7 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 - Keep the current Source Reader D3D11 path allocation-stable and avoid per-frame CPU pixel copies.
 - Prefer Windows Media Foundation system H.264 decoding.
 - Use only a few Win32 controls for UI.
-- Avoid layered transparent windows to reduce extra DWM composition cost.
+- Keep the floating layered UI overlay small so DWM composition work stays minor compared with video presentation.
 - Do not create D3D, Media Foundation, or COM resources per frame.
 - Muting writes silence instead of restarting audio devices.
 - Keep video and audio lifetimes independent and stoppable.
@@ -112,7 +112,7 @@ mftrace -log mftrace.txt build\Release\UsbCastReceiver.exe --uvc-match "your dev
 - Harden audio resampling with drift handling and glitch metrics.
 - Add audio/video sync and latency handling.
 - Add FPS, dropped-frame, and end-to-end latency statistics.
-- Refine the icon control rail hit testing and visual states if needed.
+- Refine the floating icon controls and image-backed visual states if needed.
 
 ## Validation Suggestions
 

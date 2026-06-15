@@ -417,9 +417,11 @@ HRESULT WasapiPcmRelay::Start(const std::wstring& captureDeviceMatch)
 {
     bool expected = false;
     if (!running_.compare_exchange_strong(expected, true)) {
+        Log::Write(L"WasapiPcmRelay::Start skipped because relay is already running.");
         return S_OK;
     }
 
+    Log::Checkpoint(L"WasapiPcmRelay::Start captureDeviceMatch='%s'", captureDeviceMatch.c_str());
     captureDeviceMatch_ = captureDeviceMatch;
 
     {
@@ -428,6 +430,7 @@ HRESULT WasapiPcmRelay::Start(const std::wstring& captureDeviceMatch)
         initHr_ = E_PENDING;
     }
 
+    Log::Checkpoint(L"WasapiPcmRelay starting worker thread");
     worker_ = std::thread(&WasapiPcmRelay::WorkerThread, this);
 
     HRESULT startHr = E_FAIL;
@@ -438,10 +441,13 @@ HRESULT WasapiPcmRelay::Start(const std::wstring& captureDeviceMatch)
     }
 
     if (FAILED(startHr)) {
+        LogHResult(L"WasapiPcmRelay worker initialization", startHr);
         running_.store(false);
         if (worker_.joinable()) {
             worker_.join();
         }
+    } else {
+        Log::Write(L"WasapiPcmRelay::Start completed.");
     }
 
     return startHr;
@@ -449,9 +455,12 @@ HRESULT WasapiPcmRelay::Start(const std::wstring& captureDeviceMatch)
 
 void WasapiPcmRelay::Stop()
 {
+    Log::Checkpoint(L"WasapiPcmRelay::Stop");
     running_.store(false);
     if (worker_.joinable()) {
+        Log::Write(L"Joining WASAPI worker thread.");
         worker_.join();
+        Log::Write(L"WASAPI worker thread joined.");
     }
 }
 
@@ -484,6 +493,7 @@ static bool IsInitializationSignalPending(std::mutex& mutex, bool& initDone)
 
 void WasapiPcmRelay::WorkerThread()
 {
+    Log::Checkpoint(L"WASAPI worker thread entered");
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         LogHResult(L"CoInitializeEx(audio thread)", hr);
@@ -491,11 +501,14 @@ void WasapiPcmRelay::WorkerThread()
         running_.store(false);
         return;
     }
+    Log::Write(L"WASAPI worker COM initialized.");
 
     DWORD avrtTaskIndex = 0;
     HANDLE avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &avrtTaskIndex);
     if (avrtHandle == nullptr) {
         LogHResult(L"AvSetMmThreadCharacteristicsW", HResultFromLastError());
+    } else {
+        Log::Write(L"WASAPI worker joined MMCSS Pro Audio task. handle=0x%p taskIndex=%lu", avrtHandle, avrtTaskIndex);
     }
 
     Microsoft::WRL::ComPtr<IAudioClient> captureAudioClient;
@@ -511,13 +524,18 @@ void WasapiPcmRelay::WorkerThread()
     do {
         UacDeviceEnumerator uacEnumerator;
         UacDeviceInfo captureDeviceInfo;
+        Log::Checkpoint(L"UacDeviceEnumerator::FindBestMatch");
         hr = uacEnumerator.FindBestMatch(captureDeviceMatch_, captureDeviceInfo);
         if (FAILED(hr)) {
             LogHResult(L"UacDeviceEnumerator::FindBestMatch", hr);
             break;
         }
+        Log::Write(L"Selected UAC capture endpoint for relay. name='%s' id='%s'",
+            captureDeviceInfo.friendlyName.c_str(),
+            captureDeviceInfo.deviceId.c_str());
 
         Microsoft::WRL::ComPtr<IMMDeviceEnumerator> mmEnumerator;
+        Log::Checkpoint(L"CoCreateInstance(MMDeviceEnumerator render)");
         hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&mmEnumerator));
         if (FAILED(hr)) {
             LogHResult(L"CoCreateInstance(MMDeviceEnumerator render)", hr);
@@ -525,25 +543,31 @@ void WasapiPcmRelay::WorkerThread()
         }
 
         Microsoft::WRL::ComPtr<IMMDevice> renderDevice;
+        Log::Checkpoint(L"IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender/eConsole)");
         hr = mmEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &renderDevice);
         if (FAILED(hr)) {
             LogHResult(L"IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender/eConsole)", hr);
             break;
         }
 
+        Log::Checkpoint(L"IMMDevice::Activate(capture IAudioClient)");
         hr = captureDeviceInfo.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &captureAudioClient);
         if (FAILED(hr)) {
             LogHResult(L"IMMDevice::Activate(capture IAudioClient)", hr);
             break;
         }
+        Log::Write(L"Capture IAudioClient activated. client=0x%p", captureAudioClient.Get());
 
+        Log::Checkpoint(L"IMMDevice::Activate(render IAudioClient)");
         hr = renderDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &renderAudioClient);
         if (FAILED(hr)) {
             LogHResult(L"IMMDevice::Activate(render IAudioClient)", hr);
             break;
         }
+        Log::Write(L"Render IAudioClient activated. client=0x%p", renderAudioClient.Get());
 
         WAVEFORMATEX* rawCaptureFormat = nullptr;
+        Log::Checkpoint(L"IAudioClient::GetMixFormat(capture)");
         hr = captureAudioClient->GetMixFormat(&rawCaptureFormat);
         if (FAILED(hr)) {
             LogHResult(L"IAudioClient::GetMixFormat(capture)", hr);
@@ -553,6 +577,7 @@ void WasapiPcmRelay::WorkerThread()
         LogWaveFormat(L"UAC capture format", captureFormat.get());
 
         WAVEFORMATEX* rawRenderFormat = nullptr;
+        Log::Checkpoint(L"IAudioClient::GetMixFormat(render)");
         hr = renderAudioClient->GetMixFormat(&rawRenderFormat);
         if (FAILED(hr)) {
             LogHResult(L"IAudioClient::GetMixFormat(render)", hr);
@@ -589,6 +614,7 @@ void WasapiPcmRelay::WorkerThread()
             Log::Write(L"Capture and render formats match. WASAPI relay will write PCM directly.");
         }
 
+        Log::Checkpoint(L"IAudioClient::Initialize(capture)");
         hr = captureAudioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             0,
@@ -601,6 +627,7 @@ void WasapiPcmRelay::WorkerThread()
             break;
         }
 
+        Log::Checkpoint(L"IAudioClient::Initialize(render)");
         hr = renderAudioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             0,
@@ -644,12 +671,14 @@ void WasapiPcmRelay::WorkerThread()
             break;
         }
 
+        Log::Checkpoint(L"IAudioClient::Start(render)");
         hr = renderAudioClient->Start();
         if (FAILED(hr)) {
             LogHResult(L"IAudioClient::Start(render)", hr);
             break;
         }
 
+        Log::Checkpoint(L"IAudioClient::Start(capture)");
         hr = captureAudioClient->Start();
         if (FAILED(hr)) {
             LogHResult(L"IAudioClient::Start(capture)", hr);
@@ -658,6 +687,7 @@ void WasapiPcmRelay::WorkerThread()
         }
 
         SignalInitialized(S_OK);
+        Log::Checkpoint(L"WASAPI PCM relay started");
         Log::Write(L"WASAPI PCM relay started.");
 
         while (running_.load()) {

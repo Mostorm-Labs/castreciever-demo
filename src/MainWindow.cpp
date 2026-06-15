@@ -16,6 +16,9 @@ constexpr wchar_t kMainWindowClassName[] = L"UsbCastReceiverMainWindow";
 constexpr wchar_t kVideoWindowClassName[] = L"UsbCastReceiverVideoWindow";
 constexpr wchar_t kStatsWindowClassName[] = L"UsbCastReceiverStatsWindow";
 constexpr wchar_t kSelfTestPaintProperty[] = L"UsbCastReceiverSelfTestPaint";
+constexpr wchar_t kMainPaintLoggedProperty[] = L"UsbCastReceiverMainPaintLogged";
+constexpr wchar_t kVideoPaintLoggedProperty[] = L"UsbCastReceiverVideoPaintLogged";
+constexpr wchar_t kStatsPaintLoggedProperty[] = L"UsbCastReceiverStatsPaintLogged";
 constexpr wchar_t kStatsFpsProperty[] = L"UsbCastReceiverStatsFpsTenths";
 constexpr wchar_t kStatsFrameCountProperty[] = L"UsbCastReceiverStatsFrameCount";
 constexpr int kMinWindowWidth = 480;
@@ -30,6 +33,23 @@ constexpr int kDefaultWindowHeight = 720;
 POINT ScreenPointFromLParam(LPARAM lParam)
 {
     return POINT { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+}
+
+void LogFirstPaint(HWND hwnd, const wchar_t* paintProperty, const wchar_t* name, HDC dc, const PAINTSTRUCT& paint)
+{
+    if (GetPropW(hwnd, paintProperty) != nullptr) {
+        return;
+    }
+
+    SetPropW(hwnd, paintProperty, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(1)));
+    Log::Write(L"%s first WM_PAINT: hwnd=0x%p hdc=0x%p rcPaint=(%ld,%ld)-(%ld,%ld)",
+        name,
+        hwnd,
+        dc,
+        paint.rcPaint.left,
+        paint.rcPaint.top,
+        paint.rcPaint.right,
+        paint.rcPaint.bottom);
 }
 
 LRESULT HitTestBorderlessWindow(HWND hwnd, POINT point)
@@ -163,12 +183,17 @@ LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     case WM_PAINT: {
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(hwnd, &paint);
+        LogFirstPaint(hwnd, kVideoPaintLoggedProperty, L"Video child window", dc, paint);
         if (GetPropW(hwnd, kSelfTestPaintProperty) != nullptr) {
             PaintSelfTestPattern(hwnd, dc, L"UsbCastReceiver video child window");
         }
         EndPaint(hwnd, &paint);
         return 0;
     }
+
+    case WM_NCDESTROY:
+        RemovePropW(hwnd, kVideoPaintLoggedProperty);
+        break;
 
     default:
         return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -187,6 +212,7 @@ LRESULT CALLBACK StatsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     case WM_PAINT: {
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(hwnd, &paint);
+        LogFirstPaint(hwnd, kStatsPaintLoggedProperty, L"Stats overlay window", dc, paint);
 
         RECT client = {};
         GetClientRect(hwnd, &client);
@@ -288,6 +314,7 @@ LRESULT CALLBACK StatsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     }
 
     case WM_NCDESTROY:
+        RemovePropW(hwnd, kStatsPaintLoggedProperty);
         RemovePropW(hwnd, kStatsFpsProperty);
         RemovePropW(hwnd, kStatsFrameCountProperty);
         break;
@@ -310,11 +337,13 @@ MainWindow::~MainWindow()
 
 HRESULT MainWindow::Create(HINSTANCE instance, int showCommand, IVideoPlayer* videoPlayer, IAudioPlayer* audioPlayer)
 {
+    Log::Checkpoint(L"MainWindow::Create begin");
     instance_ = instance;
     videoPlayer_ = videoPlayer;
     audioPlayer_ = audioPlayer;
 
     RETURN_IF_FAILED_LOG(RegisterWindowClass(), L"MainWindow::RegisterWindowClass");
+    Log::Checkpoint(L"CreateWindowExW(main)");
 
     hwnd_ = CreateWindowExW(
         WS_EX_APPWINDOW,
@@ -335,17 +364,27 @@ HRESULT MainWindow::Create(HINSTANCE instance, int showCommand, IVideoPlayer* vi
         LogHResult(L"CreateWindowExW(main)", hr);
         return hr;
     }
+    Log::Write(L"Main window handle created: hwnd=0x%p style=0x%08lX exStyle=0x%08lX defaultSize=%dx%d",
+        hwnd_,
+        static_cast<unsigned long>(GetWindowLongPtrW(hwnd_, GWL_STYLE)),
+        static_cast<unsigned long>(GetWindowLongPtrW(hwnd_, GWL_EXSTYLE)),
+        kDefaultWindowWidth,
+        kDefaultWindowHeight);
 
+    Log::Checkpoint(L"ShowWindow/UpdateWindow main hwnd=0x%p", hwnd_);
     ShowWindow(hwnd_, showCommand);
     UpdateWindow(hwnd_);
+    Log::Write(L"Main window shown and updated. showCommand=%d", showCommand);
     return S_OK;
 }
 
 void MainWindow::Destroy()
 {
+    Log::Checkpoint(L"MainWindow::Destroy");
     StopMedia();
 
     if (hwnd_ != nullptr) {
+        Log::Write(L"DestroyWindow(main) hwnd=0x%p", hwnd_);
         DestroyWindow(hwnd_);
         hwnd_ = nullptr;
     }
@@ -353,6 +392,7 @@ void MainWindow::Destroy()
 
 HRESULT MainWindow::RegisterWindowClass()
 {
+    Log::Checkpoint(L"RegisterWindowClass(main/video/stats)");
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = MainWindow::WindowProc;
@@ -368,6 +408,9 @@ HRESULT MainWindow::RegisterWindowClass()
             LogHResult(L"RegisterClassExW", hr);
             return hr;
         }
+        Log::Write(L"Main window class already exists.");
+    } else {
+        Log::Write(L"Registered main window class.");
     }
 
     WNDCLASSEXW videoWc = {};
@@ -385,6 +428,9 @@ HRESULT MainWindow::RegisterWindowClass()
             LogHResult(L"RegisterClassExW(video)", hr);
             return hr;
         }
+        Log::Write(L"Video child window class already exists.");
+    } else {
+        Log::Write(L"Registered video child window class.");
     }
 
     WNDCLASSEXW statsWc = {};
@@ -402,6 +448,9 @@ HRESULT MainWindow::RegisterWindowClass()
             LogHResult(L"RegisterClassExW(stats)", hr);
             return hr;
         }
+        Log::Write(L"Stats overlay window class already exists.");
+    } else {
+        Log::Write(L"Registered stats overlay window class.");
     }
 
     return S_OK;
@@ -409,6 +458,7 @@ HRESULT MainWindow::RegisterWindowClass()
 
 HRESULT MainWindow::OnCreate()
 {
+    Log::Checkpoint(L"MainWindow::OnCreate create video child");
     videoHwnd_ = CreateWindowExW(
         0,
         kVideoWindowClassName,
@@ -428,7 +478,9 @@ HRESULT MainWindow::OnCreate()
         LogHResult(L"CreateWindowExW(video)", hr);
         return hr;
     }
+    Log::Write(L"Video child window handle created: hwnd=0x%p parent=0x%p", videoHwnd_, hwnd_);
 
+    Log::Checkpoint(L"MainWindow::OnCreate create stats overlay");
     statsHwnd_ = CreateWindowExW(
         0,
         kStatsWindowClassName,
@@ -448,17 +500,33 @@ HRESULT MainWindow::OnCreate()
         LogHResult(L"CreateWindowExW(stats)", hr);
         return hr;
     }
+    Log::Write(L"Stats overlay window handle created: hwnd=0x%p parent=0x%p", statsHwnd_, hwnd_);
 
+    Log::Checkpoint(L"OverlayControls::Create");
     RETURN_IF_FAILED_LOG(controls_.Create(hwnd_, instance_), L"OverlayControls::Create");
 
     RECT client = {};
     GetClientRect(hwnd_, &client);
+    Log::Write(L"MainWindow::OnCreate initial client=%ldx%ld", client.right - client.left, client.bottom - client.top);
     OnSize(static_cast<UINT>(client.right - client.left), static_cast<UINT>(client.bottom - client.top));
+    Log::Checkpoint(L"MainWindow::OnCreate complete");
     return S_OK;
 }
 
 void MainWindow::OnSize(UINT width, UINT height)
 {
+    static UINT loggedSizeCount = 0;
+    if (loggedSizeCount < 8) {
+        ++loggedSizeCount;
+        Log::Write(L"MainWindow::OnSize #%u: %ux%u hwnd=0x%p videoHwnd=0x%p statsHwnd=0x%p",
+            loggedSizeCount,
+            width,
+            height,
+            hwnd_,
+            videoHwnd_,
+            statsHwnd_);
+    }
+
     if (videoHwnd_ != nullptr) {
         MoveWindow(videoHwnd_, 0, 0, static_cast<int>(width), static_cast<int>(height), TRUE);
     }
@@ -631,6 +699,7 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
     case WM_PAINT: {
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(hwnd, &paint);
+        LogFirstPaint(hwnd, kMainPaintLoggedProperty, L"Main window", dc, paint);
         if (GetPropW(hwnd, kSelfTestPaintProperty) != nullptr) {
             PaintSelfTestPattern(hwnd, dc, L"UsbCastReceiver main window");
         }
@@ -694,6 +763,7 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         return 0;
 
     case WM_NCDESTROY:
+        RemovePropW(hwnd, kMainPaintLoggedProperty);
         hwnd_ = nullptr;
         videoHwnd_ = nullptr;
         statsHwnd_ = nullptr;

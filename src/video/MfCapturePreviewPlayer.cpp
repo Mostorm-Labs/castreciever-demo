@@ -56,6 +56,7 @@ bool FrameRateMatchesTarget(UINT32 numerator, UINT32 denominator, UINT32 targetF
 HRESULT CreateCaptureEngine(Microsoft::WRL::ComPtr<IMFCaptureEngine>& captureEngine)
 {
     Microsoft::WRL::ComPtr<IMFCaptureEngineClassFactory> factory;
+    Log::Checkpoint(L"CoCreateInstance(CLSID_MFCaptureEngineClassFactory)");
     HRESULT hr = CoCreateInstance(
         CLSID_MFCaptureEngineClassFactory,
         nullptr,
@@ -63,6 +64,7 @@ HRESULT CreateCaptureEngine(Microsoft::WRL::ComPtr<IMFCaptureEngine>& captureEng
         IID_PPV_ARGS(&factory));
 
     if (SUCCEEDED(hr)) {
+        Log::Checkpoint(L"IMFCaptureEngineClassFactory::CreateInstance(CLSID_MFCaptureEngine)");
         hr = factory->CreateInstance(CLSID_MFCaptureEngine, IID_PPV_ARGS(&captureEngine));
         if (SUCCEEDED(hr)) {
             Log::Write(L"Created Capture Engine through IMFCaptureEngineClassFactory.");
@@ -74,6 +76,7 @@ HRESULT CreateCaptureEngine(Microsoft::WRL::ComPtr<IMFCaptureEngine>& captureEng
         LogHResult(L"CoCreateInstance(CLSID_MFCaptureEngineClassFactory)", hr);
     }
 
+    Log::Checkpoint(L"CoCreateInstance(CLSID_MFCaptureEngine)");
     hr = CoCreateInstance(
         CLSID_MFCaptureEngine,
         nullptr,
@@ -252,6 +255,7 @@ MfCapturePreviewPlayer::~MfCapturePreviewPlayer()
 HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const VideoStartOptions& options)
 {
     if (started_) {
+        Log::Write(L"MfCapturePreviewPlayer::Start skipped because preview is already started.");
         return S_OK;
     }
 
@@ -260,37 +264,57 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const VideoStartOptions& o
     }
 
     hwndVideo_ = hwndVideo;
+    Log::Checkpoint(L"MfCapturePreviewPlayer::Start hwndVideo=0x%p", hwndVideo_);
+    Log::Write(L"Capture Engine backend selected. Device match='%s' preferH264=%d targetVideoFps=%u previewSinkMode=%d",
+        options.deviceMatch.c_str(),
+        options.preferH264 ? 1 : 0,
+        options.targetVideoFps,
+        static_cast<int>(options.previewSinkMode));
 
     UvcDeviceEnumerator enumerator;
     UvcDeviceInfo selectedDevice;
+    Log::Checkpoint(L"UvcDeviceEnumerator::FindBestMatch(Capture Engine)");
     RETURN_IF_FAILED_LOG(enumerator.FindBestMatch(options.deviceMatch, selectedDevice), L"UvcDeviceEnumerator::FindBestMatch");
+    Log::Write(L"Capture Engine selected UVC device. name='%s' link='%s'",
+        selectedDevice.friendlyName.c_str(),
+        selectedDevice.symbolicLink.c_str());
 
     auto* callback = new CaptureEngineCallback();
     callback_.Attach(callback);
+    Log::Write(L"Capture Engine callback created. callback=0x%p", callback_.Get());
 
+    Log::Checkpoint(L"CreateCaptureEngine");
     RETURN_IF_FAILED_LOG(CreateCaptureEngine(captureEngine_), L"CreateCaptureEngine");
+    Log::Write(L"Capture Engine object ready. captureEngine=0x%p", captureEngine_.Get());
 
     Microsoft::WRL::ComPtr<IMFAttributes> attributes;
+    Log::Checkpoint(L"MFCreateAttributes(Capture Engine)");
     RETURN_IF_FAILED_LOG(MFCreateAttributes(&attributes, 1), L"MFCreateAttributes(Capture Engine)");
 
+    Log::Checkpoint(L"IMFCaptureEngine::Initialize opening UVC device");
     HRESULT hr = captureEngine_->Initialize(callback_.Get(), attributes.Get(), nullptr, selectedDevice.activate.Get());
     if (FAILED(hr)) {
         LogHResult(L"IMFCaptureEngine::Initialize", hr);
         Stop();
         return hr;
     }
+    Log::Write(L"IMFCaptureEngine::Initialize returned S_OK; waiting for initialized event.");
 
+    Log::Checkpoint(L"Waiting for MF_CAPTURE_ENGINE_INITIALIZED");
     hr = callback->WaitForInitialized(10000);
     if (FAILED(hr)) {
         LogHResult(L"Waiting for MF_CAPTURE_ENGINE_INITIALIZED", hr);
         Stop();
         return hr;
     }
+    Log::Write(L"Capture Engine initialized event received.");
 
+    Log::Checkpoint(L"MfCapturePreviewPlayer::ConfigureVideoMediaType");
     LOG_IF_FAILED(ConfigureVideoMediaType(options.preferH264, options.targetVideoFps), L"MfCapturePreviewPlayer::ConfigureVideoMediaType");
     LogCurrentVideoTypes();
 
     Microsoft::WRL::ComPtr<IMFCaptureSink> sink;
+    Log::Checkpoint(L"IMFCaptureEngine::GetSink(MF_CAPTURE_ENGINE_SINK_TYPE_PREVIEW)");
     hr = captureEngine_->GetSink(MF_CAPTURE_ENGINE_SINK_TYPE_PREVIEW, &sink);
     if (FAILED(hr)) {
         LogHResult(L"IMFCaptureEngine::GetSink(MF_CAPTURE_ENGINE_SINK_TYPE_PREVIEW)", hr);
@@ -298,20 +322,25 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const VideoStartOptions& o
         return hr;
     }
 
+    Log::Checkpoint(L"Query IMFCapturePreviewSink");
     hr = sink.As(&previewSink_);
     if (FAILED(hr)) {
         LogHResult(L"Query IMFCapturePreviewSink", hr);
         Stop();
         return hr;
     }
+    Log::Write(L"Capture preview sink acquired. previewSink=0x%p", previewSink_.Get());
 
+    Log::Checkpoint(L"IMFCapturePreviewSink::SetRenderHandle hwndVideo=0x%p", hwndVideo_);
     hr = previewSink_->SetRenderHandle(hwndVideo_);
     if (FAILED(hr)) {
         LogHResult(L"IMFCapturePreviewSink::SetRenderHandle", hr);
         Stop();
         return hr;
     }
+    Log::Write(L"Capture preview sink render handle set to hwnd=0x%p", hwndVideo_);
 
+    Log::Checkpoint(L"MfCapturePreviewPlayer::ConfigurePreviewSink");
     hr = ConfigurePreviewSink(options.previewSinkMode);
     if (FAILED(hr)) {
         LogHResult(L"MfCapturePreviewPlayer::ConfigurePreviewSink", hr);
@@ -319,6 +348,7 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const VideoStartOptions& o
         return hr;
     }
 
+    Log::Checkpoint(L"IMFCaptureEngine::StartPreview");
     hr = captureEngine_->StartPreview();
     if (FAILED(hr)) {
         LogHResult(L"IMFCaptureEngine::StartPreview", hr);
@@ -327,14 +357,17 @@ HRESULT MfCapturePreviewPlayer::Start(HWND hwndVideo, const VideoStartOptions& o
     }
 
     started_ = true;
+    Log::Checkpoint(L"Capture Engine preview started");
     Log::Write(L"Capture Engine preview started.");
     return S_OK;
 }
 
 void MfCapturePreviewPlayer::Stop()
 {
+    Log::Checkpoint(L"MfCapturePreviewPlayer::Stop");
     if (captureEngine_ && started_) {
         LOG_IF_FAILED(captureEngine_->StopPreview(), L"IMFCaptureEngine::StopPreview");
+        Log::Write(L"Capture Engine StopPreview requested.");
     }
 
     started_ = false;
