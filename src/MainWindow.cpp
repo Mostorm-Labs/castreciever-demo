@@ -198,6 +198,8 @@ LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     default:
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 LRESULT CALLBACK StatsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -503,7 +505,11 @@ HRESULT MainWindow::OnCreate()
     Log::Write(L"Stats overlay window handle created: hwnd=0x%p parent=0x%p", statsHwnd_, hwnd_);
 
     Log::Checkpoint(L"OverlayControls::Create");
-    RETURN_IF_FAILED_LOG(controls_.Create(hwnd_, instance_), L"OverlayControls::Create");
+    HRESULT hr = controls_.Create(hwnd_, instance_);
+    if (FAILED(hr)) {
+        LogHResult(L"OverlayControls::Create", hr);
+        Log::Write(L"Overlay controls failed to initialize; continuing without floating controls.");
+    }
 
     RECT client = {};
     GetClientRect(hwnd_, &client);

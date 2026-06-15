@@ -10,7 +10,6 @@
 namespace {
 
 constexpr wchar_t kOverlayControlsClassName[] = L"UsbCastReceiverOverlayControls";
-constexpr COLORREF kTransparentColor = RGB(255, 0, 255);
 constexpr int kButtonSize = 64;
 constexpr int kButtonGap = 20;
 constexpr int kOverlayPadding = 14;
@@ -109,7 +108,7 @@ void DrawButtonShell(HDC dc, const RECT& rect, bool hovered, bool pressed, bool 
 
 int ScaleForButton(const RECT& rect, int value)
 {
-    const int size = std::max(1, rect.right - rect.left);
+    const int size = std::max(1, static_cast<int>(rect.right - rect.left));
     return std::max(1, MulDiv(value, size, 46));
 }
 
@@ -237,6 +236,41 @@ HRESULT RegisterOverlayClass(HINSTANCE instance)
     return S_OK;
 }
 
+void UpdateOverlayRegion(HWND hwnd, int width, int height)
+{
+    HRGN combinedRegion = CreateRectRgn(0, 0, 0, 0);
+    if (combinedRegion == nullptr) {
+        LogHResult(L"CreateRectRgn(overlay controls)", HResultFromLastError());
+        return;
+    }
+
+    RECT client = {};
+    client.right = width;
+    client.bottom = height;
+    const int commands[] = {
+        ID_BTN_MUTE,
+        ID_BTN_MAX_RESTORE,
+        ID_BTN_STOP,
+    };
+
+    for (int commandId : commands) {
+        const RECT rect = ButtonRectForCommand(client, commandId);
+        HRGN buttonRegion = CreateEllipticRgn(rect.left, rect.top, rect.right + 1, rect.bottom + 1);
+        if (buttonRegion == nullptr) {
+            LogHResult(L"CreateEllipticRgn(overlay controls)", HResultFromLastError());
+            continue;
+        }
+
+        CombineRgn(combinedRegion, combinedRegion, buttonRegion, RGN_OR);
+        DeleteObject(buttonRegion);
+    }
+
+    if (SetWindowRgn(hwnd, combinedRegion, TRUE) == 0) {
+        LogHResult(L"SetWindowRgn(overlay controls)", HResultFromLastError());
+        DeleteObject(combinedRegion);
+    }
+}
+
 } // namespace
 
 HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
@@ -248,7 +282,7 @@ HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
     Log::Checkpoint(L"CreateWindowExW(overlay controls)");
 
     hwnd_ = CreateWindowExW(
-        WS_EX_LAYERED,
+        0,
         kOverlayControlsClassName,
         nullptr,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
@@ -266,12 +300,6 @@ HRESULT OverlayControls::Create(HWND parent, HINSTANCE instance)
         return hr;
     }
     Log::Write(L"Overlay controls window handle created: hwnd=0x%p parent=0x%p", hwnd_, parent_);
-
-    if (!SetLayeredWindowAttributes(hwnd_, kTransparentColor, 0, LWA_COLORKEY)) {
-        LogHResult(L"SetLayeredWindowAttributes(overlay controls)", HResultFromLastError());
-    } else {
-        Log::Write(L"Overlay controls color-key transparency enabled.");
-    }
 
     return S_OK;
 }
@@ -305,6 +333,7 @@ void OverlayControls::Layout(const RECT& client)
     }
 
     MoveWindow(hwnd_, x, y, width, height, TRUE);
+    UpdateOverlayRegion(hwnd_, width, height);
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 }
 
@@ -452,9 +481,6 @@ void OverlayControls::Paint(HDC dc)
 {
     RECT client = {};
     GetClientRect(hwnd_, &client);
-
-    ScopedBrush transparentBrush(CreateSolidBrush(kTransparentColor));
-    FillRect(dc, &client, transparentBrush.brush);
 
     const int commands[] = {
         ID_BTN_MUTE,
